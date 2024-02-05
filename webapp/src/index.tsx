@@ -93,40 +93,38 @@ export default class Plugin {
             localStorage[channelIdEvent] = lastPostFromViewedChannel.id;
         });
         
-        // registry.registerWebSocketEventHandler('thread_read_changed', async (event) => {
-        //     console.log('thread_read_changed');
+        registry.registerWebSocketEventHandler('thread_read_changed', async (event) => {
+            // В каком именно треде произошло событие.
+            let threadId = event.data.thread_id
+            // Список сообщений в треде. Убирем из списка перывый пост, потому что он 
+            // он виден в основном канале и на нем должна остать реакция. 
+            let postList = ((await store.dispatch(getPostThread(threadId) as any)).data.posts as Post[]);
+            postList = Object.values(postList).sort((a, b) => a.create_at - b.create_at).slice(1);
 
-        //     // В каком именно треде произошло событие.
-        //     let threadId = event.data.thread_id
-        //     // Список сообщений в треде. Убирем из списка перывый пост, потому что он 
-        //     // он виден в основном канале и на нем должна остать реакция. 
-        //     let postList = ((await store.dispatch(getPostThread(threadId) as any)).data.posts as Post[]);
-        //     postList = Object.values(postList).sort((a, b) => a.create_at - b.create_at).slice(1);
+            const isLastPostInThreadByMe = postList[postList.length - 1].user_id == this.Me.id;
 
-        //     Object.entries(postList).forEach(([key, value]) => {
-        //         let postMetaData = value.metadata as PostMetadata;
 
-        //         if(postMetaData?.reactions){
-        //             console.log("postMeta", postMetaData?.reactions)
-        //             let currentUserReactions = postMetaData.reactions.filter((r) => r.user_id == this.Me.id && r.emoji_name == this.EmojiForReaction);
-        //             console.log("currentUserReactions", currentUserReactions);
-        //             currentUserReactions.forEach(element => {
-        //                 console.log("element", element);
-        //                 store.dispatch(removeReaction(element.post_id, this.EmojiForReaction) as any)
+            Object.entries(postList).forEach(([key, value]) => {
+                let postMetaData = value.metadata as PostMetadata;
+
+                if(postMetaData?.reactions){
+                    let currentUserReactions = postMetaData.reactions.filter((r) => r.user_id == this.Me.id && r.emoji_name == this.EmojiForReaction);
+                    currentUserReactions.forEach(element => {
+                        store.dispatch(removeReaction(element.post_id, this.EmojiForReaction) as any)
                         
-        //             });
+                    });
                     
-        //         }
-        //       });
+                }
+              });
 
-        //     if(Object.entries(postList).length >= 1 )
-        //     {
-        //         const postListValues = Object.values(postList);
+            if(Object.entries(postList).length >= 1 && !isLastPostInThreadByMe)
+            {
+                const postListValues = Object.values(postList);
                 
-        //         await store.dispatch(addReaction(postListValues[postListValues.length - 1].id, this.EmojiForReaction) as any);
-        //     }
+                await store.dispatch(addReaction(postListValues[postListValues.length - 1].id, this.EmojiForReaction) as any);
+            }
 
-        // });
+        });
 
     }
 }
