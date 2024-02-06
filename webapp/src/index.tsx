@@ -1,4 +1,5 @@
 import { Store, Action } from 'redux';
+import {General, Permissions} from 'mattermost-redux/constants';
 import { GlobalState } from 'mattermost-redux/types/store';
 import { WebSocketMessage } from "@mattermost/types/lib/websocket";
 import { PluginRegistry } from '@/types/mattermost-webapp';
@@ -9,18 +10,9 @@ import { $ID, RelationOneToOne, RelationOneToMany, Dictionary } from "mattermost
 import { Post, PostList, PostMetadata } from "mattermost-redux/types/posts"
 import { Channel } from "mattermost-redux/types/channels"
 
+
 import manifest from '@/manifest';
 import { UserProfile } from 'mattermost-redux/types/users';
-
-interface ThreadReadChangedEvent {
-    channel_id: string;
-    previous_unread_mentions: number;
-    previous_unread_replies: number;
-    thread_id: string;
-    timestamp: number;
-    unread_mentions: number;
-    unread_replies: number;
-}
 
 interface ChannelTimes {
     [channelId: string]: number;
@@ -32,22 +24,41 @@ export default class Plugin {
     LastReactedPost : Dictionary<Post>;
     EmojiForReaction : string = "eyes"
     Me : UserProfile;
+    LastChannelsViewed : ChannelTimes;
+    lastTimeViewedAnyChannel: Number = 0;
+    lastEventType : string = "";
+    CurrentOpenThreadId: string | null = null;
+    WindowsIsActive : boolean = false;
 
     constructor() {
         this.LastReactedPost = {} as Dictionary<Post>;
         this.Me = {} as UserProfile;
+        this.LastChannelsViewed = {} as ChannelTimes;
     }
 
     public async initialize(registry: PluginRegistry, store: Store<GlobalState, Action<Record<string, unknown>>>) {
         
         this.Me = (await store.dispatch(getMe() as any)).data as UserProfile;
+
+        window.addEventListener("focus", async () => {
+            this.WindowsIsActive = true;
+            if(this.CurrentOpenThreadId)
+            {
+                let sortedPostFromThread = await this.GetSortedPostsInThread(this.CurrentOpenThreadId, store);
+                await this.AddReactionInThreadByPosts(sortedPostFromThread, store);
+            }
+        });
+        window.addEventListener("blur", () => {
+            this.WindowsIsActive = false;
+        });
         
+        
+        registry.registerWebSocketEventHandler('multiple_channels_viewed', async (event: WebSocketMessage<ChannelTimes>) => {
 
-        registry.registerWebSocketEventHandler('multiple_channels_viewed', (event: WebSocketMessage<ChannelTimes>) => {
-
-            // console.log('multiple_channels_viewed');
+            this.lastEventType = "multiple_channels_viewed";
 
             let currentStore = store.getState();
+
 
 
             // Получаем последнии сообщения из всех каналов
@@ -55,7 +66,15 @@ export default class Plugin {
 
             // Получаем Id канала в котором произошло событие просмотра каналаю.
             let channelIdEvent = Object.keys(event.data.channel_times)[0];
-            
+
+            Object.entries(event.data.channel_times).forEach(([key, value]) => {
+                this.LastChannelsViewed[key] = value;
+            });
+
+            let channelEventTime =  this.LastChannelsViewed[channelIdEvent]; 
+
+            this.lastTimeViewedAnyChannel = channelEventTime;
+
             // Получаем последний пост в канале, который был просмотрен
             const lastPostFromViewedChannel = lastPostsInChannel[channelIdEvent];
 
@@ -68,7 +87,6 @@ export default class Plugin {
             // Если реакция о просмотре уже установленна на последний пост в канале,
             // то ничего не делаем.
             if(this.LastReactedPost[channelIdEvent]?.id == lastPostFromViewedChannel.id || localStorage[channelIdEvent] == lastPostFromViewedChannel.id ) {
-                // console.log("Возникло событие multiple_channels_viewed, хотя сообщений в канале не было.");
                 return;
             }
             // Проверка наличия поста на котром уже стоит реакция
@@ -94,38 +112,72 @@ export default class Plugin {
         });
         
         registry.registerWebSocketEventHandler('thread_read_changed', async (event) => {
+
+            let eventTime : Number = event.data.timestamp;
+            
             // В каком именно треде произошло событие.
             let threadId = event.data.thread_id
-            // Список сообщений в треде. Убирем из списка перывый пост, потому что он 
-            // он виден в основном канале и на нем должна остать реакция. 
-            let postList = ((await store.dispatch(getPostThread(threadId) as any)).data.posts as Post[]);
-            postList = Object.values(postList).sort((a, b) => a.create_at - b.create_at).slice(1);
 
+            let postList = await this.GetSortedPostsInThread(threadId, store);
             const isLastPostInThreadByMe = postList[postList.length - 1].user_id == this.Me.id;
-
-
-            Object.entries(postList).forEach(([key, value]) => {
-                let postMetaData = value.metadata as PostMetadata;
-
-                if(postMetaData?.reactions){
-                    let currentUserReactions = postMetaData.reactions.filter((r) => r.user_id == this.Me.id && r.emoji_name == this.EmojiForReaction);
-                    currentUserReactions.forEach(element => {
-                        store.dispatch(removeReaction(element.post_id, this.EmojiForReaction) as any)
-                        
-                    });
-                    
-                }
-              });
-
-            if(Object.entries(postList).length >= 1 && !isLastPostInThreadByMe)
-            {
-                const postListValues = Object.values(postList);
-                
-                await store.dispatch(addReaction(postListValues[postListValues.length - 1].id, this.EmojiForReaction) as any);
+            
+            if(!this.WindowsIsActive && !isLastPostInThreadByMe) {
+                this.CurrentOpenThreadId = threadId;
+                return;
             }
+
+            await this.AddReactionInThreadByPosts(postList, store);
 
         });
 
+        registry.registerWebSocketEventHandler('thread_updated', async (event) => {
+            this.lastEventType = 'thread_updated';
+
+        });
+
+    }
+
+    /**
+     * Удаляет старый маркер просмотра сообщения в треде и ставит на последнее.
+     * @param postList Список постов в треде.
+     * @param store Стор.
+     */
+    public async AddReactionInThreadByPosts(postList: Post[], store: Store<GlobalState, Action<Record<string, unknown>>>) : Promise<void> {
+        const isLastPostInThreadByMe = postList[postList.length - 1].user_id == this.Me.id;
+
+        Object.entries(postList).forEach(([key, value]) => {
+            let postMetaData = value.metadata as PostMetadata;
+
+            if(postMetaData?.reactions){
+                let currentUserReactions = postMetaData.reactions.filter((r) => r.user_id == this.Me.id && r.emoji_name == this.EmojiForReaction);
+                currentUserReactions.forEach(element => {
+                    store.dispatch(removeReaction(element.post_id, this.EmojiForReaction) as any)
+                    
+                });
+                
+            }
+          });
+
+        if(Object.entries(postList).length >= 1 && !isLastPostInThreadByMe)
+        {
+            const postListValues = Object.values(postList);
+            
+            await store.dispatch(addReaction(postListValues[postListValues.length - 1].id, this.EmojiForReaction) as any);
+        }
+    }
+
+    /**
+     * Получает все посты треда. Сортирует по времени. От ранних к поздним.
+     * @param threadId Id треда.
+     * @param store Стор.
+     * @returns Отсортированный списко постов. Исключает головной пост.
+     */
+    public async GetSortedPostsInThread(threadId: string, store: Store<GlobalState, Action<Record<string, unknown>>>) : Promise<Post[]> {
+        // Список сообщений в треде. Убирем из списка перывый пост, потому что он 
+        // он виден в основном канале и на нем должна остать реакция. 
+        let postList = ((await store.dispatch(getPostThread(threadId) as any)).data.posts as Post[]);
+        postList = Object.values(postList).sort((a, b) => a.create_at - b.create_at).slice(1);
+        return postList;
     }
 }
 
