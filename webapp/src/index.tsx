@@ -25,8 +25,6 @@ export default class Plugin {
     EmojiForReaction : string = "eyes"
     Me : UserProfile;
     LastChannelsViewed : ChannelTimes;
-    lastTimeViewedAnyChannel: Number = 0;
-    lastEventType : string = "";
     CurrentOpenThreadId: string | null = null;
     WindowsIsActive : boolean = false;
 
@@ -55,11 +53,7 @@ export default class Plugin {
         
         registry.registerWebSocketEventHandler('multiple_channels_viewed', async (event: WebSocketMessage<ChannelTimes>) => {
 
-            this.lastEventType = "multiple_channels_viewed";
-
             let currentStore = store.getState();
-
-
 
             // Получаем последнии сообщения из всех каналов
             let lastPostsInChannel : RelationOneToOne<Channel, Post> = getLastPostPerChannel(currentStore);
@@ -70,10 +64,6 @@ export default class Plugin {
             Object.entries(event.data.channel_times).forEach(([key, value]) => {
                 this.LastChannelsViewed[key] = value;
             });
-
-            let channelEventTime =  this.LastChannelsViewed[channelIdEvent]; 
-
-            this.lastTimeViewedAnyChannel = channelEventTime;
 
             // Получаем последний пост в канале, который был просмотрен
             const lastPostFromViewedChannel = lastPostsInChannel[channelIdEvent];
@@ -113,8 +103,6 @@ export default class Plugin {
         
         registry.registerWebSocketEventHandler('thread_read_changed', async (event) => {
 
-            let eventTime : Number = event.data.timestamp;
-            
             // В каком именно треде произошло событие.
             let threadId = event.data.thread_id
 
@@ -127,11 +115,6 @@ export default class Plugin {
             }
 
             await this.AddReactionInThreadByPosts(postList, store);
-
-        });
-
-        registry.registerWebSocketEventHandler('thread_updated', async (event) => {
-            this.lastEventType = 'thread_updated';
 
         });
 
