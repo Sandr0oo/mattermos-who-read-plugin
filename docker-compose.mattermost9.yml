@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:13-alpine
+    container_name: who-read-mm9-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: mmuser_password
+      POSTGRES_DB: mattermost
+    volumes:
+      - mattermost9-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mmuser -d mattermost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:release-9.11
+    container_name: who-read-mm9
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8065:8065"
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:mmuser_password@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: http://localhost:8065
+      MM_SERVICESETTINGS_LISTENADDRESS: :8065
+      MM_SERVICESETTINGS_ENABLEDEVELOPER: "true"
+      MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+      MM_PLUGINSETTINGS_ENABLE: "true"
+      MM_PLUGINSETTINGS_ENABLEUPLOADS: "true"
+      MM_PLUGINSETTINGS_AUTOMATICPREPACKAGEDPLUGINS: "false"
+      MM_TEAMSETTINGS_ENABLEUSERCREATION: "true"
+      MM_EMAILSETTINGS_ENABLESIGNUPWITHEMAIL: "true"
+      MM_LOGSETTINGS_CONSOLELEVEL: WARN
+      MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
+    volumes:
+      - mattermost9-config:/mattermost/config
+      - mattermost9-data:/mattermost/data
+      - mattermost9-logs:/mattermost/logs
+      - mattermost9-plugins:/mattermost/plugins
+      - mattermost9-client-plugins:/mattermost/client/plugins
+      - mattermost9-local:/var/tmp
+
+  plugin-dev:
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: docker/mattermost9-plugin-dev.Dockerfile
+    depends_on:
+      mattermost:
+        condition: service_healthy
+    working_dir: /src
+    volumes:
+      - .:/src
+      - mattermost9-local:/var/tmp
+      - mattermost9-go-mod:/go/pkg/mod
+      - mattermost9-go-build:/root/.cache/go-build
+    entrypoint: ["sh", "/src/scripts/mattermost9-dev.sh"]
+    command: ["setup"]
+
+volumes:
+  mattermost9-postgres:
+  mattermost9-config:
+  mattermost9-data:
+  mattermost9-logs:
+  mattermost9-plugins:
+  mattermost9-client-plugins:
+  mattermost9-local:
+  mattermost9-go-mod:
+  mattermost9-go-build:
