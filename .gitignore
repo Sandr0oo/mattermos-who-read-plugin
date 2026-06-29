@@ -11,3 +11,8 @@ server/manifest.go
 
 # VS Code
 .vscode
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

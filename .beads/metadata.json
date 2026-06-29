@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "mattermos_who_read_plugin",
+  "project_id": "4c5a9516-b381-4dad-ab72-f322fb27c461"
+}
