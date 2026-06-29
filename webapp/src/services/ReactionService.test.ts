@@ -4,6 +4,8 @@ import {addReaction, removeReaction} from 'mattermost-redux/actions/posts';
 
 import {createStore, flushPromises} from '../../tests/helpers';
 
+import Logger from '../utils/Logger';
+
 import ReadState from './ReadState';
 import ReactionService from './ReactionService';
 
@@ -32,6 +34,17 @@ describe('ReactionService', () => {
         expect(dispatch).toHaveBeenCalledWith({emoji: 'eyes', postId: 'post-id', type: 'REMOVE_REACTION'});
     });
 
+    it('returns operation status from add and remove', async () => {
+        const dispatch = jest.fn(() => Promise.resolve({}));
+        const {store} = createStore({}, dispatch);
+        const service = new ReactionService(store, new ReadState(), 'eyes');
+
+        await expect(service.add('post-id')).resolves.toBe(true);
+        await expect(service.remove('post-id')).resolves.toBe(true);
+        await expect(service.add('')).resolves.toBe(false);
+        await expect(service.remove('')).resolves.toBe(false);
+    });
+
     it('skips duplicate operations while a post is pending', async () => {
         let resolveDispatch: () => void = jest.fn();
         const dispatch = jest.fn(() => new Promise<void>((resolve) => {
@@ -55,7 +68,7 @@ describe('ReactionService', () => {
 
     it('retries once and clears pending state after a failed add', async () => {
         jest.useFakeTimers();
-        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => null);
+        const errorSpy = jest.spyOn(Logger, 'error').mockImplementation(jest.fn());
         const dispatch = jest.fn(() => Promise.reject(new Error('network')));
         const readState = new ReadState();
         const {store} = createStore({}, dispatch);
@@ -67,11 +80,11 @@ describe('ReactionService', () => {
         expect(readState.isPending('post-id')).toBe(true);
 
         jest.advanceTimersByTime(500);
-        await addPromise;
+        await expect(addPromise).resolves.toBe(false);
 
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(readState.isPending('post-id')).toBe(false);
-        expect(errorSpy).toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalledWith('Failed to add reaction on post post-id:', expect.any(Error));
 
         errorSpy.mockRestore();
     });
@@ -85,5 +98,38 @@ describe('ReactionService', () => {
 
         expect(removeReaction).toHaveBeenNthCalledWith(1, 'old-post-id', 'eyes');
         expect(removeReaction).toHaveBeenNthCalledWith(2, 'new-post-id', 'eyes');
+    });
+
+    it('deduplicates removeFromPosts input', async () => {
+        const dispatch = jest.fn(() => Promise.resolve({}));
+        const {store} = createStore({}, dispatch);
+        const service = new ReactionService(store, new ReadState(), 'eyes');
+
+        await service.removeFromPosts(['old-post-id', '', 'old-post-id', 'new-post-id', 'new-post-id']);
+
+        expect(removeReaction).toHaveBeenCalledTimes(2);
+        expect(removeReaction).toHaveBeenNthCalledWith(1, 'old-post-id', 'eyes');
+        expect(removeReaction).toHaveBeenNthCalledWith(2, 'new-post-id', 'eyes');
+    });
+
+    it('stops removing posts after the first failed remove', async () => {
+        jest.useFakeTimers();
+        const errorSpy = jest.spyOn(Logger, 'error').mockImplementation(jest.fn());
+        const dispatch = jest.fn(() => Promise.reject(new Error('network')));
+        const {store} = createStore({}, dispatch);
+        const service = new ReactionService(store, new ReadState(), 'eyes');
+
+        const removePromise = service.removeFromPosts(['old-post-id', 'new-post-id']);
+        await Promise.resolve();
+
+        jest.advanceTimersByTime(500);
+        await expect(removePromise).resolves.toBe(false);
+
+        expect(removeReaction).toHaveBeenCalledTimes(2);
+        expect(removeReaction).toHaveBeenCalledWith('old-post-id', 'eyes');
+        expect(removeReaction).not.toHaveBeenCalledWith('new-post-id', 'eyes');
+        expect(errorSpy).toHaveBeenCalledWith('Failed to remove reaction on post old-post-id:', expect.any(Error));
+
+        errorSpy.mockRestore();
     });
 });

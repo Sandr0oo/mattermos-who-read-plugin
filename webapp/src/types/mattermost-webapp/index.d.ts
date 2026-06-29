@@ -1,7 +1,7 @@
 export interface PluginRegistry {
     registerPostTypeComponent(typeName: string, component: React.ElementType): void;
 
-    registerWebSocketEventHandler(event: string, handler: (evt: any) => void): void;
+    registerWebSocketEventHandler<TEvent = unknown>(event: string, handler: (evt: TEvent) => void | Promise<void>): void;
 
     unregisterWebSocketEventHandler(event: string): void;
 

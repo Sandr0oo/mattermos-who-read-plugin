@@ -1,6 +1,5 @@
 export default class ReadState {
     private lastReactedPost = new Map<string, string>();
-    private lastChannelsViewed = new Map<string, number>();
     private pendingReactions = new Set<string>();
     private currentOpenThreadId: string | null = null;
     private windowIsActive = false;
@@ -38,14 +37,6 @@ export default class ReadState {
         return this.lastReactedPost.get(channelId);
     }
 
-    setLastViewed(channelId: string, timestamp: number): void {
-        this.lastChannelsViewed.set(channelId, timestamp);
-    }
-
-    getLastViewed(channelId: string): number | undefined {
-        return this.lastChannelsViewed.get(channelId);
-    }
-
     addPending(postId: string): void {
         this.pendingReactions.add(postId);
     }
@@ -58,33 +49,8 @@ export default class ReadState {
         return this.pendingReactions.has(postId);
     }
 
-    /**
-     * Проверяет, можем ли мы проставить реакцию на данный пост в канале.
-     * Возвращает true, если:
-     * - пост валиден
-     * - нет pending-операции на этом посте
-     * - реакция ещё не стоит на этом посте
-     */
-    canReactToPost(channelId: string, postId: string, storageLastPostId: string | null): boolean {
-        if (!postId) {
-            return false;
-        }
-        if (this.isPending(postId)) {
-            return false;
-        }
-        const lastReacted = this.getLastReactedPost(channelId);
-        if (lastReacted === postId) {
-            return false;
-        }
-        if (storageLastPostId === postId) {
-            return false;
-        }
-        return true;
-    }
-
     clear(): void {
         this.lastReactedPost.clear();
-        this.lastChannelsViewed.clear();
         this.pendingReactions.clear();
         this.currentOpenThreadId = null;
         this.windowIsActive = false;

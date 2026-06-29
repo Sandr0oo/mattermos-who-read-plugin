@@ -1,5 +1,6 @@
 import {addReaction, removeReaction} from 'mattermost-redux/actions/posts';
 
+import Logger from '../utils/Logger';
 import {AppStore, dispatchAsync} from '../utils/Dispatch';
 
 import ReadState from './ReadState';
@@ -31,31 +32,33 @@ export default class ReactionService {
         }
     }
 
-    async add(postId: string): Promise<void> {
+    async add(postId: string): Promise<boolean> {
         if (!postId || this.readState.isPending(postId)) {
-            return;
+            return false;
         }
         this.readState.addPending(postId);
         try {
             await this.dispatchWithRetry(() => dispatchAsync(this.store, addReaction(postId, this.emoji)));
+            return true;
         } catch (err) {
-            // eslint-disable-next-line no-console
-            console.error(`[WhoReadPlugin] Failed to add reaction on post ${postId}:`, err);
+            Logger.error(`Failed to add reaction on post ${postId}:`, err);
+            return false;
         } finally {
             this.readState.removePending(postId);
         }
     }
 
-    async remove(postId: string): Promise<void> {
+    async remove(postId: string): Promise<boolean> {
         if (!postId || this.readState.isPending(postId)) {
-            return;
+            return false;
         }
         this.readState.addPending(postId);
         try {
             await this.dispatchWithRetry(() => dispatchAsync(this.store, removeReaction(postId, this.emoji)));
+            return true;
         } catch (err) {
-            // eslint-disable-next-line no-console
-            console.error(`[WhoReadPlugin] Failed to remove reaction on post ${postId}:`, err);
+            Logger.error(`Failed to remove reaction on post ${postId}:`, err);
+            return false;
         } finally {
             this.readState.removePending(postId);
         }
@@ -65,10 +68,16 @@ export default class ReactionService {
      * Удаляет реакцию текущего пользователя со всех указанных постов.
      * Выполняется последовательно (for…of + await), чтобы избежать гонок.
      */
-    async removeFromPosts(postIds: string[]): Promise<void> {
-        for (const postId of postIds) {
+    async removeFromPosts(postIds: string[]): Promise<boolean> {
+        const uniquePostIds = Array.from(new Set(postIds.filter(Boolean)));
+        for (const postId of uniquePostIds) {
             // eslint-disable-next-line no-await-in-loop
-            await this.remove(postId);
+            const removed = await this.remove(postId);
+            if (!removed) {
+                return false;
+            }
         }
+
+        return true;
     }
 }
