@@ -3,4 +3,8 @@
 
 // import '@mattermost/webapp/tests/setup';
 
+if (typeof window !== 'undefined') {
+    (window as any).registerPlugin = jest.fn();
+}
+
 export {};
