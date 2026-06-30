@@ -1,9 +1,9 @@
 # Agent Notes
 
 ## Plugin type
-- **Webapp-only** Mattermost plugin. There is no `server/` directory and no server-side Go code.
-- All runtime logic is in `webapp/src/index.tsx` (React/TS plugin registered via `window.registerPlugin`).
-- `go.mod` and the Makefile's Go tooling exist only for build scripts under `build/` (manifest generator, deployment helper).
+- Mattermost plugin with both `server/` and `webapp/` parts.
+- Go runtime code lives in `server/`; build scripts live in `build/`.
+- Webapp runtime logic starts in `webapp/src/index.tsx` (React/TS plugin registered via `window.registerPlugin`) and is split into services/components under `webapp/src/`.
 
 ## Build / test prerequisites
 - `make apply` must run before building or testing. It generates `webapp/src/manifest.ts` from `plugin.json`.
@@ -22,7 +22,7 @@ Makefile enforces this in `check-style`:
 1. `make apply`
 2. `cd webapp && npm run lint`
 3. `cd webapp && npm run check-types` (`tsc`)
-4. `go vet ./...` + `golangci-lint run ./...` (only hits `build/`)
+4. `go vet ./...` + `golangci-lint run ./...` (covers Go code in `server/` and `build/`)
 
 ## Webapp testing
 - Tests run with Jest + Enzyme (legacy). Setup file: `webapp/tests/setup.tsx`.

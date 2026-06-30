@@ -7,6 +7,14 @@ import {getCurrentUser} from 'mattermost-redux/selectors/entities/users';
 
 import {createPost, createRegistry, createStore, flushPromises} from '../tests/helpers';
 
+import {HYBRID_READ_RECEIPT_EMOJI, READ_RECEIPT_MODE_STORAGE_KEY, ReadReceiptMode} from './config/ReadReceiptConfig';
+import {
+    READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT,
+    READ_RECEIPT_CONFIG_CHANGED_WEBSOCKET_EVENT,
+    READ_RECEIPT_UPDATED_BROWSER_EVENT,
+    READ_RECEIPT_UPDATED_WEBSOCKET_EVENT,
+} from './events/ReadReceiptEvents';
+import {SERVER_READ_RECEIPT_API_PREFIX} from './services/ServerReadReceiptService';
 import Logger from './utils/Logger';
 import Storage from './utils/Storage';
 
@@ -37,13 +45,13 @@ const getLastPostPerChannelMock = getLastPostPerChannel as jest.Mock;
 const getPostThreadMock = getPostThread as jest.Mock;
 const removeReactionMock = removeReaction as jest.Mock;
 
-function createMetadataWithMyEyes(postId: string) {
+function createMetadataWithMyReadReaction(postId: string, emojiName = 'eyes') {
     return {
         embeds: [],
         emojis: [],
         files: [],
         images: {},
-        reactions: [{create_at: 0, emoji_name: 'eyes', post_id: postId, user_id: 'me'}],
+        reactions: [{create_at: 0, emoji_name: emojiName, post_id: postId, user_id: 'me'}],
     };
 }
 
@@ -54,6 +62,80 @@ function createControlledPromise() {
     });
 
     return {promise, resolvePromise};
+}
+
+function createFetchResponse(body: unknown, ok = true, status = ok ? 200 : 500) {
+    return Promise.resolve({
+        json: jest.fn(() => Promise.resolve(body)),
+        ok,
+        status,
+        statusText: ok ? 'OK' : 'Internal Server Error',
+        text: jest.fn(() => Promise.resolve(JSON.stringify(body))),
+    });
+}
+
+function mockServerConfig(config: Record<string, unknown> = {readReceiptMode: ReadReceiptMode.LegacyReactions}, emojiStatus: Record<string, unknown> = {}) {
+    const fetchMock = jest.fn((url: string) => {
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/config`) {
+            return createFetchResponse(config);
+        }
+
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/emoji/status`) {
+            return createFetchResponse({
+                configured_available: true,
+                configured_emoji_name: HYBRID_READ_RECEIPT_EMOJI,
+                effective_available: true,
+                effective_emoji_name: HYBRID_READ_RECEIPT_EMOJI,
+                fallback_used: false,
+                ...emojiStatus,
+            });
+        }
+
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/read-state`) {
+            return createFetchResponse({data: {post_id: 'post-id'}, status: 'ok'});
+        }
+
+        return Promise.reject(new Error(`Unexpected fetch ${url}`));
+    });
+    (global as any).fetch = fetchMock;
+    return fetchMock;
+}
+
+function mockServerConfigUnavailable() {
+    const fetchMock = jest.fn((url: string) => {
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/config`) {
+            return Promise.reject(new Error('server unavailable'));
+        }
+
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/emoji/status`) {
+            return createFetchResponse({
+                configured_available: true,
+                configured_emoji_name: HYBRID_READ_RECEIPT_EMOJI,
+                effective_available: true,
+                effective_emoji_name: HYBRID_READ_RECEIPT_EMOJI,
+                fallback_used: false,
+            });
+        }
+
+        if (url === `${SERVER_READ_RECEIPT_API_PREFIX}/read-state`) {
+            return createFetchResponse({data: {post_id: 'post-id'}, status: 'ok'});
+        }
+
+        return Promise.reject(new Error(`Unexpected fetch ${url}`));
+    });
+    (global as any).fetch = fetchMock;
+    return fetchMock;
+}
+
+function expectReadStateRequest(fetchMock: jest.Mock, body: Record<string, unknown>) {
+    const call = fetchMock.mock.calls.find(([url]) => url === `${SERVER_READ_RECEIPT_API_PREFIX}/read-state`);
+    expect(call).toBeDefined();
+    const init = call?.[1] as RequestInit;
+    expect(init).toEqual(expect.objectContaining({
+        credentials: 'same-origin',
+        method: 'POST',
+    }));
+    expect(JSON.parse(String(init.body))).toEqual(body);
 }
 
 function createDispatchForThread(posts: Record<string, unknown>) {
@@ -73,6 +155,7 @@ describe('Plugin read reaction behavior', () => {
         localStorage.clear();
         getCurrentUserMock.mockReturnValue({id: 'me'});
         getLastPostPerChannelMock.mockReturnValue({});
+        mockServerConfig();
     });
 
     describe('lifecycle', () => {
@@ -93,6 +176,75 @@ describe('Plugin read reaction behavior', () => {
             expect(handlers.multiple_channels_viewed).toBeUndefined();
             expect(handlers.thread_read_changed).toBeUndefined();
         });
+
+        it('registers and unregisters the mirror reaction hider and footer in hybrid mode', async () => {
+            mockServerConfig({
+                hideMirrorReactionsInWeb: true,
+                mirrorReactionsEnabled: true,
+                readReceiptMode: ReadReceiptMode.HybridServer,
+            });
+            const {registry} = createRegistry();
+            const {store} = createStore();
+            const plugin = new Plugin();
+
+            await plugin.initialize(registry, store);
+
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
+            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
+
+            plugin.uninitialize();
+
+            expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id');
+            expect(registry.unregisterComponent).toHaveBeenCalledWith('post-footer-component-id');
+        });
+
+        it('uses effective fallback emoji for the mirror reaction hider', async () => {
+            mockServerConfig({
+                hideMirrorReactionsInWeb: true,
+                mirrorReactionsEnabled: true,
+                readReceiptMode: ReadReceiptMode.HybridServer,
+            }, {
+                configured_available: false,
+                effective_emoji_name: 'eyes',
+                fallback_used: true,
+            });
+            const {registry} = createRegistry();
+            const {store} = createStore();
+
+            await new Plugin().initialize(registry, store);
+
+            const component = (registry.registerRootComponent as jest.Mock).mock.calls[0][0];
+            expect(component().props.emojiName).toBe('eyes');
+        });
+
+        it('registers server websocket handlers in server modes', async () => {
+            mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
+            const {handlers, registry} = createRegistry();
+            const {store} = createStore();
+            const plugin = new Plugin();
+            const readReceiptListener = jest.fn();
+            const configChangedListener = jest.fn();
+            window.addEventListener(READ_RECEIPT_UPDATED_BROWSER_EVENT, readReceiptListener);
+            window.addEventListener(READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT, configChangedListener);
+
+            await plugin.initialize(registry, store);
+
+            expect(handlers[READ_RECEIPT_UPDATED_WEBSOCKET_EVENT]).toBeDefined();
+            expect(handlers[READ_RECEIPT_CONFIG_CHANGED_WEBSOCKET_EVENT]).toBeDefined();
+
+            await handlers[READ_RECEIPT_UPDATED_WEBSOCKET_EVENT]({data: {post_id: 'post-id', previous_post_id: 'old-post-id'}});
+            await handlers[READ_RECEIPT_CONFIG_CHANGED_WEBSOCKET_EVENT]({data: {updated_at: 123}});
+
+            expect(readReceiptListener).toHaveBeenCalledWith(expect.objectContaining({detail: {post_id: 'post-id', previous_post_id: 'old-post-id'}}));
+            expect(configChangedListener).toHaveBeenCalledWith(expect.objectContaining({detail: {updated_at: 123}}));
+
+            plugin.uninitialize();
+            expect(registry.unregisterWebSocketEventHandler).toHaveBeenCalledWith(READ_RECEIPT_UPDATED_WEBSOCKET_EVENT);
+            expect(registry.unregisterWebSocketEventHandler).toHaveBeenCalledWith(READ_RECEIPT_CONFIG_CHANGED_WEBSOCKET_EVENT);
+
+            window.removeEventListener(READ_RECEIPT_UPDATED_BROWSER_EVENT, readReceiptListener);
+            window.removeEventListener(READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT, configChangedListener);
+        });
     });
 
     describe('multiple_channels_viewed', () => {
@@ -107,8 +259,64 @@ describe('Plugin read reaction behavior', () => {
             await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
 
             expect(addReactionMock).toHaveBeenCalledWith('last-post-id', 'eyes');
+            expect(registry.registerRootComponent).not.toHaveBeenCalled();
+            expect(registry.registerPostFooterComponent).not.toHaveBeenCalled();
             expect(removeReactionMock).not.toHaveBeenCalled();
             expect(Storage.getLastPostId('channelA')).toBe('last-post-id');
+            expect(Storage.getLastViewed('channelA')).toBe(123);
+        });
+
+        it('falls back to localStorage hybrid mode and marks channel read state through server API', async () => {
+            const errorSpy = jest.spyOn(Logger, 'error').mockImplementation(jest.fn());
+            const fetchMock = mockServerConfigUnavailable();
+            localStorage.setItem(READ_RECEIPT_MODE_STORAGE_KEY, ReadReceiptMode.HybridServer);
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            const lastPost = createPost({id: 'last-post-id', user_id: 'other'});
+            getLastPostPerChannelMock.mockReturnValue({channelA: lastPost});
+
+            await new Plugin().initialize(registry, store);
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            expectReadStateRequest(fetchMock, {
+                channel_id: 'channelA',
+                last_read_post_id: 'last-post-id',
+                scope_type: 'channel',
+            });
+            expect(addReactionMock).not.toHaveBeenCalled();
+            expect(removeReactionMock).not.toHaveBeenCalled();
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
+            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
+            expect(Storage.getLastPostId('channelA')).toBe('last-post-id');
+            expect(Storage.getLastViewed('channelA')).toBe(123);
+
+            errorSpy.mockRestore();
+        });
+
+        it('marks own channel post through server API without direct reaction calls in server_web_only mode', async () => {
+            const fetchMock = mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            Storage.setLastPostId('channelA', 'old-post-id');
+            getLastPostPerChannelMock.mockReturnValue({
+                channelA: createPost({id: 'own-post-id', user_id: 'me'}),
+            });
+
+            await new Plugin().initialize(registry, store);
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            expectReadStateRequest(fetchMock, {
+                channel_id: 'channelA',
+                last_read_post_id: 'own-post-id',
+                scope_type: 'channel',
+            });
+            expect(removeReactionMock).not.toHaveBeenCalled();
+            expect(addReactionMock).not.toHaveBeenCalled();
+            expect(registry.registerRootComponent).not.toHaveBeenCalled();
+            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
+            expect(Storage.getLastPostId('channelA')).toBe('own-post-id');
             expect(Storage.getLastViewed('channelA')).toBe(123);
         });
 
@@ -181,7 +389,7 @@ describe('Plugin read reaction behavior', () => {
             getLastPostPerChannelMock.mockReturnValue({
                 channelA: createPost({
                     id: 'already-reacted-post-id',
-                    metadata: createMetadataWithMyEyes('already-reacted-post-id'),
+                    metadata: createMetadataWithMyReadReaction('already-reacted-post-id'),
                     user_id: 'other',
                 }),
             });
@@ -191,6 +399,28 @@ describe('Plugin read reaction behavior', () => {
 
             expect(removeReactionMock).not.toHaveBeenCalled();
             expect(addReactionMock).not.toHaveBeenCalled();
+            expect(Storage.getLastPostId('channelA')).toBe('already-reacted-post-id');
+        });
+
+        it('uses server API in hybrid mode even when a mirror reaction is already present', async () => {
+            const fetchMock = mockServerConfig({readReceiptMode: ReadReceiptMode.HybridServer});
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            getLastPostPerChannelMock.mockReturnValue({
+                channelA: createPost({
+                    id: 'already-reacted-post-id',
+                    metadata: createMetadataWithMyReadReaction('already-reacted-post-id', HYBRID_READ_RECEIPT_EMOJI),
+                    user_id: 'other',
+                }),
+            });
+
+            await new Plugin().initialize(registry, store);
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            expect(removeReactionMock).not.toHaveBeenCalled();
+            expect(addReactionMock).not.toHaveBeenCalled();
+            expect(fetchMock).toHaveBeenCalledWith(`${SERVER_READ_RECEIPT_API_PREFIX}/read-state`, expect.objectContaining({method: 'POST'}));
             expect(Storage.getLastPostId('channelA')).toBe('already-reacted-post-id');
         });
 
@@ -281,13 +511,36 @@ describe('Plugin read reaction behavior', () => {
     });
 
     describe('thread_read_changed', () => {
+        it('marks latest reply through server API in server modes without direct reaction calls', async () => {
+            const fetchMock = mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
+            const {handlers, registry} = createRegistry();
+            const rootPost = createPost({channel_id: 'channel-id', create_at: 100, id: 'root-id'});
+            const lastReply = createPost({channel_id: 'channel-id', create_at: 300, id: 'last-reply-id', root_id: 'thread-id', user_id: 'other'});
+            const dispatch = createDispatchForThread({lastReply, rootPost});
+            const {store} = createStore({}, dispatch);
+
+            await new Plugin().initialize(registry, store);
+            window.dispatchEvent(new Event('focus'));
+            await handlers.thread_read_changed({data: {thread_id: 'thread-id'}});
+
+            expect(getPostThreadMock).toHaveBeenCalledWith('thread-id');
+            expectReadStateRequest(fetchMock, {
+                channel_id: 'channel-id',
+                last_read_post_id: 'last-reply-id',
+                scope_type: 'thread',
+                thread_id: 'thread-id',
+            });
+            expect(removeReactionMock).not.toHaveBeenCalled();
+            expect(addReactionMock).not.toHaveBeenCalled();
+        });
+
         it('cleans old thread reactions and marks the latest reply when the window is active', async () => {
             const {handlers, registry} = createRegistry();
             const rootPost = createPost({create_at: 100, id: 'root-id'});
             const oldReply = createPost({
                 create_at: 200,
                 id: 'old-reply-id',
-                metadata: createMetadataWithMyEyes('old-reply-id'),
+                metadata: createMetadataWithMyReadReaction('old-reply-id'),
                 user_id: 'other',
             });
             const lastReply = createPost({create_at: 300, id: 'last-reply-id', user_id: 'other'});
@@ -344,7 +597,7 @@ describe('Plugin read reaction behavior', () => {
             const oldReply = createPost({
                 create_at: 200,
                 id: 'old-reply-id',
-                metadata: createMetadataWithMyEyes('old-reply-id'),
+                metadata: createMetadataWithMyReadReaction('old-reply-id'),
                 user_id: 'other',
             });
             const ownReply = createPost({create_at: 300, id: 'own-reply-id', user_id: 'me'});
@@ -379,7 +632,7 @@ describe('Plugin read reaction behavior', () => {
             const lastReply = createPost({
                 create_at: 300,
                 id: 'last-reply-id',
-                metadata: createMetadataWithMyEyes('last-reply-id'),
+                metadata: createMetadataWithMyReadReaction('last-reply-id'),
                 user_id: 'other',
             });
             const dispatch = createDispatchForThread({lastReply, oldReply, rootPost});

@@ -8,6 +8,8 @@ export function createRegistry() {
     const handlers: Record<string, Handler> = {};
     const registry: PluginRegistry = {
         registerPostTypeComponent: jest.fn(),
+        registerPostFooterComponent: jest.fn(() => 'post-footer-component-id'),
+        registerRootComponent: jest.fn(() => 'root-component-id'),
         registerWebSocketEventHandler: jest.fn((event: string, handler: Handler) => {
             handlers[event] = handler;
         }),

@@ -7,12 +7,92 @@
     "version": "3.1",
     "icon_path": "assets/starter-template-icon.svg",
     "min_server_version": "9.0.0",
+    "server": {
+        "executables": {
+            "linux-amd64": "server/dist/plugin-linux-amd64",
+            "linux-arm64": "server/dist/plugin-linux-arm64",
+            "darwin-amd64": "server/dist/plugin-darwin-amd64",
+            "darwin-arm64": "server/dist/plugin-darwin-arm64",
+            "windows-amd64": "server/dist/plugin-windows-amd64.exe"
+        }
+    },
     "webapp": {
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "",
-        "footer": "",
-        "settings": []
+        "header": "Настройки режима уведомлений о прочтении. Legacy-режим продолжает использовать обычные реакции, server-режимы сохраняют состояние на стороне плагина.",
+        "footer": "Плагин не создаёт custom emoji автоматически: добавьте emoji вручную или включите fallback на стандартный :eyes:.",
+        "settings": [
+            {
+                "key": "readReceiptMode",
+                "display_name": "Режим read receipts",
+                "type": "dropdown",
+                "help_text": "legacy_reactions сохраняет существующее поведение через реакции webapp. hybrid_server сохраняет состояние на сервере и зеркалирует его reaction-emoji. server_web_only сохраняет состояние на сервере без прямого добавления реакций.",
+                "default": "legacy_reactions",
+                "options": [
+                    {
+                        "display_name": "Legacy reactions",
+                        "value": "legacy_reactions"
+                    },
+                    {
+                        "display_name": "Hybrid server + mirror reactions",
+                        "value": "hybrid_server"
+                    },
+                    {
+                        "display_name": "Server state, web only",
+                        "value": "server_web_only"
+                    }
+                ]
+            },
+            {
+                "key": "mirrorEmojiName",
+                "display_name": "Mirror reaction emoji",
+                "type": "text",
+                "help_text": "Имя custom emoji для server-side зеркальной реакции без двоеточий. По умолчанию who_read_eyes. Emoji нужно создать вручную в Mattermost.",
+                "default": "who_read_eyes"
+            },
+            {
+                "key": "mirrorReactionsEnabled",
+                "display_name": "Включить зеркальные реакции",
+                "type": "bool",
+                "help_text": "Если включено, режим hybrid_server добавляет/удаляет mirror reaction на последнем прочитанном посте.",
+                "default": true
+            },
+            {
+                "key": "hideMirrorReactionsInWeb",
+                "display_name": "Скрывать зеркальные реакции в webapp",
+                "type": "bool",
+                "help_text": "Флаг для webapp: скрывать служебные mirror reactions из UI, когда включён hybrid/server режим. Webapp использует effective emoji из /api/v1/emoji/status.",
+                "default": true
+            },
+            {
+                "key": "fallbackToStandardEyes",
+                "display_name": "Fallback на стандартный :eyes:",
+                "type": "bool",
+                "help_text": "Если custom emoji из mirrorEmojiName не найден, использовать стандартный eyes. Плагин только проверяет emoji и не создаёт его автоматически.",
+                "default": false
+            },
+            {
+                "key": "showReaderNames",
+                "display_name": "Показывать имена прочитавших",
+                "type": "bool",
+                "help_text": "Если включено, /api/v1/readers/batch возвращает username/display name для прочитавших пользователей. Счётчики возвращаются всегда.",
+                "default": true
+            },
+            {
+                "key": "retentionDays",
+                "display_name": "Хранение read receipts, дней",
+                "type": "number",
+                "help_text": "Сколько дней учитывать reader-index при выдаче API и admin cleanup. 0 отключает фильтрацию и cleanup по сроку.",
+                "default": 90
+            },
+            {
+                "key": "maxReadersPerPost",
+                "display_name": "Максимум readers на пост в API",
+                "type": "number",
+                "help_text": "Ограничивает размер массива readers в /api/v1/readers/batch; общий count по посту возвращается отдельно.",
+                "default": 50
+            }
+        ]
     }
 }

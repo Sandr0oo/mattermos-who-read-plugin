@@ -14,6 +14,14 @@ log() {
     printf "\n==> %s\n" "$*"
 }
 
+has_server() {
+    if [ -d server ]; then
+        return 0
+    fi
+
+    node -e "const m = require('./plugin.json'); process.exit(m.server && m.server.executables ? 0 : 1)"
+}
+
 wait_mmctl() {
     i=0
     while [ "$i" -lt 120 ]; do
@@ -29,9 +37,30 @@ wait_mmctl() {
     exit 1
 }
 
-build_webapp() {
+build_server() {
+    if ! has_server; then
+        return 0
+    fi
+
+    if [ ! -d server ]; then
+        echo "plugin.json declares server.executables, but server/ is missing" >&2
+        exit 1
+    fi
+
+    log "build server"
+    mkdir -p server/dist
+    (cd server && env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin-linux-amd64)
+    (cd server && env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/plugin-linux-arm64)
+    (cd server && env CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -o dist/plugin-darwin-amd64)
+    (cd server && env CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o dist/plugin-darwin-arm64)
+    (cd server && env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o dist/plugin-windows-amd64.exe)
+}
+
+build_plugin() {
     log "generate manifest"
     go run ./build/manifest apply
+
+    build_server
 
     if [ "${INSTALL_DEPENDENCIES:-0}" = "1" ] || [ ! -d webapp/node_modules ]; then
         log "npm install"
@@ -51,6 +80,15 @@ pack_plugin() {
 
     [ -d assets ] && cp -R assets "dist/$PLUGIN_ID/"
     [ -d public ] && cp -R public "dist/$PLUGIN_ID/"
+    if has_server; then
+        if [ ! -d server/dist ]; then
+            echo "server/dist not found; run deploy/setup to build server executables" >&2
+            exit 1
+        fi
+
+        mkdir -p "dist/$PLUGIN_ID/server"
+        cp -R server/dist "dist/$PLUGIN_ID/server/"
+    fi
     cp -R webapp/dist "dist/$PLUGIN_ID/webapp/"
 
     (cd dist && tar -czf "$BUNDLE_NAME" "$PLUGIN_ID")
@@ -65,7 +103,7 @@ deploy_archive() {
 }
 
 deploy() {
-    build_webapp
+    build_plugin
     pack_plugin
     deploy_archive
     list_plugins
@@ -133,7 +171,7 @@ list_plugins() {
 }
 
 setup() {
-    build_webapp
+    build_plugin
     setup_users
     pack_plugin
     deploy_archive
