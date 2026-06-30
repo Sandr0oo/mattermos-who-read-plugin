@@ -45,6 +45,12 @@ services:
       - mattermost9-plugins:/mattermost/plugins
       - mattermost9-client-plugins:/mattermost/client/plugins
       - mattermost9-local:/var/tmp
+    healthcheck:
+      test: ["CMD-SHELL", "/mattermost/bin/mmctl --local system status >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
 
   plugin-dev:
     profiles:

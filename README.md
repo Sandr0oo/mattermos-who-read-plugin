@@ -109,11 +109,13 @@ docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-d
 Эта команда:
 
 1. Поднимает PostgreSQL и Mattermost 9.11.
-2. Генерирует `webapp/src/manifest.ts`.
-3. Если в проекте есть server plugin, собирает `server/dist/*` для `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`; затем собирает `webapp/dist/main.js`.
-4. Упаковывает архив `dist/com.mattermost.who-read-plugin-<version>.tar.gz`.
-5. Создает команду `test-team` и тестовых пользователей.
-6. Устанавливает плагин в Mattermost через `mmctl plugin add --force`.
+2. Ждет готовности Mattermost через `mmctl --local system status`.
+3. Создает или чинит тестовых пользователей `admin`, `alice`, `bob`: verify/activate, сбрасывает dev-пароли, для `admin` гарантирует `system_admin`; затем создает команду `test-team`.
+4. Генерирует `webapp/src/manifest.ts`.
+5. Если в проекте есть server plugin, собирает `server/dist/*` для `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`; затем собирает `webapp/dist/main.js`.
+6. Упаковывает архив `dist/com.mattermost.who-read-plugin-<version>.tar.gz`.
+7. Проверяет архив и устанавливает плагин в Mattermost через `mmctl plugin add --force`.
+8. Включает плагин через `mmctl plugin enable` и проверяет, что он попал в секцию enabled.
 
 После запуска:
 
@@ -123,6 +125,16 @@ docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-d
 - `bob@example.com` / `Password123!`
 
 `plugin-dev` - это одноразовый helper-контейнер. Он сделал работу и завершился. Сам Mattermost после этого продолжает работать в контейнере `who-read-mm9`.
+
+Проверить, что пользователи действительно есть:
+
+```bash
+docker exec who-read-mm9 mmctl --local user search admin@example.com
+docker exec who-read-mm9 mmctl --local user search alice@example.com
+docker exec who-read-mm9 mmctl --local user search bob@example.com
+```
+
+В выводе каждой команды должна быть соответствующая пара username/email.
 
 ### После изменений в коде
 
@@ -137,8 +149,10 @@ docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-d
 
     ```text
     Added plugin: /src/dist/com.mattermost.who-read-plugin-<version>.tar.gz
-    Enabled plugin: com.mattermost.who-read-plugin
+    plugin enabled: com.mattermost.who-read-plugin
     ```
+
+    Warning от `mmctl plugin enable` допустим, если после него есть строка `plugin enabled: com.mattermost.who-read-plugin`, а `plugin list` показывает плагин в enabled-секции.
 
 4. Обновил вкладку Mattermost в браузере.
 
@@ -161,6 +175,52 @@ com.mattermost.who-read-plugin: ...
 
 ```bash
 docker exec who-read-mm9 mmctl --local plugin list
+```
+
+Плагин должен быть именно в секции `Listing enabled plugins`, а не только в disabled/inactive.
+
+### Troubleshooting локального стенда
+
+#### В Mattermost 0 users
+
+`setup` создает пользователей до тяжелой сборки плагина, поэтому даже ошибка build/package не должна оставлять чистый стенд без `admin`, `alice`, `bob`. Проверь готовность Mattermost и пользователей:
+
+```bash
+docker exec who-read-mm9 mmctl --local system status
+docker exec who-read-mm9 mmctl --local user search admin@example.com
+docker exec who-read-mm9 mmctl --local user search alice@example.com
+docker exec who-read-mm9 mmctl --local user search bob@example.com
+```
+
+Если пользователей нет, запусти setup повторно:
+
+```bash
+docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-dev
+```
+
+Для полностью чистого стенда можно удалить volumes и снова выполнить setup:
+
+```bash
+docker compose -f docker-compose.mattermost9.yml down -v
+docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-dev
+```
+
+#### Плагин отсутствует или не включен
+
+`deploy`/`setup` перед загрузкой проверяет непустой `dist/com.mattermost.who-read-plugin-<version>.tar.gz`, валидность `tar -tzf`, затем делает `mmctl plugin add --force` и `mmctl plugin enable`. После этого скрипт отдельно проверяет enabled-секцию `mmctl plugin list`.
+
+`mmctl plugin enable` ограничен `PLUGIN_ENABLE_TIMEOUT_SECONDS` (по умолчанию 60 секунд): при таймауте скрипт предупреждает и всё равно проверяет enabled-секцию через `plugin list`.
+
+Проверка:
+
+```bash
+docker exec who-read-mm9 mmctl --local plugin list
+```
+
+Если `com.mattermost.who-read-plugin` не в `Listing enabled plugins`, перезапусти deploy и смотри ошибку скрипта: он должен вывести проблему с архивом, upload/enable или итоговый `plugin list`.
+
+```bash
+docker compose -f docker-compose.mattermost9.yml --profile dev run --rm plugin-dev deploy
 ```
 
 ### Ручная матрица проверки
