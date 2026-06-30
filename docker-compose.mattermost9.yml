@@ -67,7 +67,13 @@ services:
       - mattermost9-local:/var/tmp
       - mattermost9-go-mod:/go/pkg/mod
       - mattermost9-go-build:/root/.cache/go-build
-    entrypoint: ["sh", "/src/scripts/mattermost9-dev.sh"]
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        tr -d '\r' < /src/scripts/mattermost9-dev.sh > /tmp/mattermost9-dev.sh
+        exec sh /tmp/mattermost9-dev.sh "$$@"
+      - mattermost9-dev.sh
     command: ["setup"]
 
 volumes:
