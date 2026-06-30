@@ -68,8 +68,8 @@ services:
       - mattermost9-go-mod:/go/pkg/mod
       - mattermost9-go-build:/root/.cache/go-build
     entrypoint:
-      - bash
-      - -lc
+      - sh
+      - -c
       - |
         tr -d '\r' < /src/scripts/mattermost9-dev.sh > /tmp/mattermost9-dev.sh
         exec sh /tmp/mattermost9-dev.sh "$$@"
