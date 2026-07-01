@@ -11,6 +11,7 @@ import {PluginRegistry} from '@/types/mattermost-webapp';
 import manifest from '@/manifest';
 
 import MirrorReactionHider from './components/MirrorReactionHider';
+import ReadReceiptDomFallback from './components/ReadReceiptDomFallback';
 import ReadReceiptIndicator from './components/ReadReceiptIndicator';
 import {DEFAULT_READ_RECEIPT_CONFIG, LEGACY_READ_RECEIPT_EMOJI, ReadReceiptConfig, resolveReadReceiptConfig} from './config/ReadReceiptConfig';
 import {
@@ -53,6 +54,7 @@ export default class Plugin {
     private registry: PluginRegistry | null = null;
     private mirrorReactionHiderComponentId: string | null = null;
     private mirrorReactionHiderEmojiName: string | null = null;
+    private readReceiptDomFallbackComponentId: string | null = null;
     private readReceiptIndicatorComponentId: string | null = null;
     private serverWebSocketHandlersRegistered = false;
     private operationQueues = new Map<string, Promise<void>>();
@@ -208,8 +210,12 @@ export default class Plugin {
             this.mirrorReactionHiderComponentId = registry.registerRootComponent(MirrorReactionHiderComponent);
         }
 
-        if (this.readReceiptConfig.isServerMode && canRegisterPostFooterComponent(registry)) {
-            this.readReceiptIndicatorComponentId = registry.registerPostFooterComponent(ReadReceiptIndicator);
+        if (this.readReceiptConfig.isServerMode) {
+            if (canRegisterPostFooterComponent(registry)) {
+                this.readReceiptIndicatorComponentId = registry.registerPostFooterComponent(ReadReceiptIndicator);
+            } else {
+                this.readReceiptDomFallbackComponentId = registry.registerRootComponent(ReadReceiptDomFallback);
+            }
         }
     }
 
@@ -231,6 +237,10 @@ export default class Plugin {
         if (this.readReceiptIndicatorComponentId) {
             this.registry?.unregisterComponent(this.readReceiptIndicatorComponentId);
             this.readReceiptIndicatorComponentId = null;
+        }
+        if (this.readReceiptDomFallbackComponentId) {
+            this.registry?.unregisterComponent(this.readReceiptDomFallbackComponentId);
+            this.readReceiptDomFallbackComponentId = null;
         }
         this.registry = null;
         this.reactionService = null;

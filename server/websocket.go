@@ -13,7 +13,7 @@ func (p *Plugin) publishReadReceiptUpdated(result *readStateResult) {
 	}
 
 	payload := map[string]any{
-		"scope_type":       result.ScopeType,
+		"scope_type":       string(result.ScopeType),
 		"scope_id":         result.ScopeID,
 		"channel_id":       result.ChannelID,
 		"post_id":          result.PostID,
@@ -24,13 +24,12 @@ func (p *Plugin) publishReadReceiptUpdated(result *readStateResult) {
 	p.API.PublishWebSocketEvent(websocketEventReadReceiptUpdated, payload, &model.WebsocketBroadcast{ChannelId: result.ChannelID})
 }
 
-func (p *Plugin) publishConfigChanged(configuration *configuration) {
-	if p.API == nil || configuration == nil {
+func (p *Plugin) publishConfigChanged() {
+	if p.API == nil {
 		return
 	}
 
 	p.API.PublishWebSocketEvent(websocketEventReadReceiptConfigChanged, map[string]any{
-		"config":     configuration.Clone(),
 		"updated_at": model.GetMillis(),
 	}, &model.WebsocketBroadcast{})
 }

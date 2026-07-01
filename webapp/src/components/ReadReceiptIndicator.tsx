@@ -9,6 +9,13 @@ import {
 import {clearReadReceiptReadersCache, fetchReadReceiptReaders} from '../services/ReadReceiptReadersStore';
 import {ReaderInfo} from '../services/ServerReadReceiptService';
 
+import {
+    READ_RECEIPT_INDICATOR_CLASS,
+    READ_RECEIPT_INDICATOR_STYLE,
+    buildReadReceiptText,
+    buildReadReceiptTitle,
+} from './ReadReceiptIndicatorDisplay';
+
 interface ReadReceiptIndicatorProps {
     post?: Post;
 }
@@ -78,25 +85,11 @@ export default function ReadReceiptIndicator({post}: ReadReceiptIndicatorProps):
         return null;
     }
 
-    const title = buildTitle(state.count, state.readers);
+    const title = buildReadReceiptTitle(state.count, state.readers);
     return React.createElement('span', {
         'aria-label': title,
-        className: 'who-read-readers',
-        style: {color: 'var(--center-channel-color-56)', fontSize: '12px', marginLeft: '8px'},
+        className: READ_RECEIPT_INDICATOR_CLASS,
+        style: READ_RECEIPT_INDICATOR_STYLE,
         title,
-    }, `✓ ${state.count}`);
-}
-
-function buildTitle(count: number, readers: ReaderInfo[]): string {
-    const names = readers.map(readerDisplayName).filter(Boolean);
-    if (names.length > 0) {
-        return `Прочитали: ${names.join(', ')}`;
-    }
-
-    return `Прочитали: ${count}`;
-}
-
-function readerDisplayName(reader: ReaderInfo): string {
-    const fullName = [reader.first_name, reader.last_name].filter(Boolean).join(' ').trim();
-    return reader.nickname || fullName || reader.username || reader.user_id;
+    }, buildReadReceiptText(state.count));
 }

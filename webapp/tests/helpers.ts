@@ -6,10 +6,14 @@ type Handler = (event: any) => void | Promise<void>;
 
 export function createRegistry() {
     const handlers: Record<string, Handler> = {};
+    let rootComponentCounter = 0;
     const registry: PluginRegistry = {
         registerPostTypeComponent: jest.fn(),
         registerPostFooterComponent: jest.fn(() => 'post-footer-component-id'),
-        registerRootComponent: jest.fn(() => 'root-component-id'),
+        registerRootComponent: jest.fn(() => {
+            rootComponentCounter += 1;
+            return rootComponentCounter === 1 ? 'root-component-id' : `root-component-id-${rootComponentCounter}`;
+        }),
         registerWebSocketEventHandler: jest.fn((event: string, handler: Handler) => {
             handlers[event] = handler;
         }),

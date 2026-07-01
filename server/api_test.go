@@ -62,6 +62,75 @@ func TestServeHTTPReadStateHappyPath(t *testing.T) {
 	api.AssertExpectations(t)
 }
 
+func TestServeHTTPReadStateHybridModeReadersBatchReturnsIndexedReader(t *testing.T) {
+	api := &plugintest.API{}
+	plugin := &Plugin{}
+	plugin.API = api
+	attachMockKV(api)
+	plugin.store = NewKVStore(api)
+	configuration := defaultConfiguration()
+	configuration.ReadReceiptMode = ModeHybridServer
+	configuration.MirrorReactionsEnabled = true
+	configuration.MirrorEmojiName = standardEyesEmojiName
+	configuration.ShowReaderNames = true
+	plugin.setConfiguration(configuration)
+
+	readerID := model.NewId()
+	requestUserID := model.NewId()
+	channelID := model.NewId()
+	postID := model.NewId()
+
+	api.On("GetChannelMember", channelID, readerID).Return(&model.ChannelMember{ChannelId: channelID, UserId: readerID}, nil).Once()
+	api.On("GetPost", postID).Return(&model.Post{Id: postID, ChannelId: channelID, UserId: requestUserID}, nil).Once()
+	api.On("GetReactions", postID).Return([]*model.Reaction{}, nil).Once()
+	api.On("AddReaction", mock.MatchedBy(func(reaction *model.Reaction) bool {
+		return reaction != nil && reaction.PostId == postID && reaction.UserId == readerID && reaction.ChannelId == channelID && reaction.EmojiName == standardEyesEmojiName
+	})).Return(&model.Reaction{}, nil).Once()
+	api.On("PublishWebSocketEvent", websocketEventReadReceiptUpdated, mock.Anything, mock.MatchedBy(func(broadcast *model.WebsocketBroadcast) bool {
+		return broadcast != nil && broadcast.ChannelId == channelID
+	})).Return().Once()
+
+	readRequest := newJSONRequest(t, http.MethodPost, "/api/v1/read-state", map[string]any{
+		"scope_type":        ScopeTypeChannel,
+		"channel_id":        channelID,
+		"last_read_post_id": postID,
+	})
+	readRequest.Header.Set(mattermostUserIDHeader, readerID)
+	readResponse := httptest.NewRecorder()
+
+	plugin.ServeHTTP(nil, readResponse, readRequest)
+	require.Equal(t, http.StatusOK, readResponse.Code)
+
+	var readPayload struct {
+		Data readStateResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(readResponse.Body.Bytes(), &readPayload))
+	require.Equal(t, "added", readPayload.Data.MirrorReaction)
+	require.Equal(t, standardEyesEmojiName, readPayload.Data.MirrorEmojiName)
+
+	api.On("GetChannelMember", channelID, requestUserID).Return(&model.ChannelMember{ChannelId: channelID, UserId: requestUserID}, nil).Once()
+	api.On("GetUser", readerID).Return(&model.User{Id: readerID, Username: "bob"}, nil).Once()
+
+	batchRequest := newJSONRequest(t, http.MethodPost, "/api/v1/readers/batch", map[string]any{"post_ids": []string{postID}})
+	batchRequest.Header.Set(mattermostUserIDHeader, requestUserID)
+	batchResponse := httptest.NewRecorder()
+
+	plugin.ServeHTTP(nil, batchResponse, batchRequest)
+	require.Equal(t, http.StatusOK, batchResponse.Code)
+
+	var batchPayload struct {
+		Posts map[string]postReadersResponse `json:"posts"`
+	}
+	require.NoError(t, json.Unmarshal(batchResponse.Body.Bytes(), &batchPayload))
+	require.Contains(t, batchPayload.Posts, postID)
+	require.Equal(t, 1, batchPayload.Posts[postID].Count)
+	require.Len(t, batchPayload.Posts[postID].Readers, 1)
+	require.Equal(t, readerID, batchPayload.Posts[postID].Readers[0].UserID)
+	require.Equal(t, "bob", batchPayload.Posts[postID].Readers[0].Username)
+
+	api.AssertExpectations(t)
+}
+
 func TestServeHTTPReadStateRequiresAuth(t *testing.T) {
 	plugin := &Plugin{}
 	request := newJSONRequest(t, http.MethodPost, "/api/v1/read-state", map[string]any{})
@@ -69,6 +138,33 @@ func TestServeHTTPReadStateRequiresAuth(t *testing.T) {
 
 	plugin.ServeHTTP(nil, response, request)
 	require.Equal(t, http.StatusUnauthorized, response.Code)
+}
+
+func TestServeHTTPConfigRefreshesPersistedConfiguration(t *testing.T) {
+	api := &plugintest.API{}
+	plugin := &Plugin{}
+	plugin.API = api
+
+	staleConfiguration := defaultConfiguration()
+	staleConfiguration.ReadReceiptMode = ModeLegacyReactions
+	plugin.setConfiguration(staleConfiguration)
+
+	api.On("GetPluginConfig").Return(map[string]any{
+		"readReceiptMode": string(ModeLegacyReactions),
+		"readreceiptmode": string(ModeHybridServer),
+	}).Once()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	response := httptest.NewRecorder()
+
+	plugin.ServeHTTP(nil, response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+
+	var configuration configuration
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &configuration))
+	require.Equal(t, ModeHybridServer, configuration.ReadReceiptMode)
+
+	api.AssertExpectations(t)
 }
 
 func TestServeHTTPReadStateSuppressesNoop(t *testing.T) {
@@ -141,7 +237,6 @@ func TestServeHTTPReadersBatchHidesReadersWhenNamesDisabled(t *testing.T) {
 		ChannelID: channelID,
 	}, now))
 
-	api.On("GetPost", postID).Return(&model.Post{Id: postID, ChannelId: channelID, UserId: model.NewId()}, nil).Once()
 	api.On("GetChannelMember", channelID, requestUserID).Return(&model.ChannelMember{ChannelId: channelID, UserId: requestUserID}, nil).Once()
 
 	request := newJSONRequest(t, http.MethodPost, "/api/v1/readers/batch", map[string]any{"post_ids": []string{postID}})
@@ -163,6 +258,91 @@ func TestServeHTTPReadersBatchHidesReadersWhenNamesDisabled(t *testing.T) {
 	require.Contains(t, payload.Posts, postID)
 	require.Equal(t, 1, payload.Posts[postID].Count)
 	require.Empty(t, payload.Posts[postID].Readers)
+
+	api.AssertExpectations(t)
+}
+
+func TestServeHTTPReadersBatchUsesIndexedChannelWithoutPostLookup(t *testing.T) {
+	api := &plugintest.API{}
+	plugin := &Plugin{}
+	plugin.API = api
+	plugin.store = NewKVStore(newMemoryKV())
+	configuration := defaultConfiguration()
+	configuration.ShowReaderNames = false
+	plugin.setConfiguration(configuration)
+
+	requestUserID := model.NewId()
+	readerUserID := model.NewId()
+	channelID := model.NewId()
+	postID := model.NewId()
+	now := model.GetMillis()
+
+	require.NoError(t, plugin.store.UpsertPostReaderScope(postID, channelID, readerUserID, ReaderScopeRecord{
+		ScopeType: ScopeTypeChannel,
+		ScopeID:   channelID,
+		ChannelID: channelID,
+	}, now))
+
+	api.On("GetChannelMember", channelID, requestUserID).Return(&model.ChannelMember{ChannelId: channelID, UserId: requestUserID}, nil).Once()
+
+	request := newJSONRequest(t, http.MethodPost, "/api/v1/readers/batch", map[string]any{"post_ids": []string{postID}})
+	request.Header.Set(mattermostUserIDHeader, requestUserID)
+	response := httptest.NewRecorder()
+
+	plugin.ServeHTTP(nil, response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+
+	var payload struct {
+		Posts map[string]postReadersResponse `json:"posts"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
+	require.Contains(t, payload.Posts, postID)
+	require.Equal(t, 1, payload.Posts[postID].Count)
+	require.Empty(t, payload.Posts[postID].Readers)
+
+	api.AssertExpectations(t)
+}
+
+func TestServeHTTPReadersBatchRefreshesDirtyConfiguration(t *testing.T) {
+	api := &plugintest.API{}
+	plugin := &Plugin{}
+	plugin.API = api
+	plugin.store = NewKVStore(newMemoryKV())
+	configuration := defaultConfiguration()
+	configuration.ShowReaderNames = true
+	plugin.setConfiguration(configuration)
+
+	api.On("PublishWebSocketEvent", websocketEventReadReceiptConfigChanged, mock.Anything, mock.Anything).Return().Once()
+	require.NoError(t, plugin.OnConfigurationChange())
+	require.True(t, plugin.isConfigurationDirty())
+
+	api.On("GetPluginConfig").Return(map[string]any{
+		"showReaderNames": false,
+	}).Once()
+
+	requestUserID := model.NewId()
+	readerUserID := model.NewId()
+	channelID := model.NewId()
+	postID := model.NewId()
+	now := model.GetMillis()
+
+	require.NoError(t, plugin.store.UpsertPostReaderScope(postID, channelID, readerUserID, ReaderScopeRecord{
+		ScopeType: ScopeTypeChannel,
+		ScopeID:   channelID,
+		ChannelID: channelID,
+	}, now))
+
+	api.On("GetChannelMember", channelID, requestUserID).Return(&model.ChannelMember{ChannelId: channelID, UserId: requestUserID}, nil).Once()
+
+	request := newJSONRequest(t, http.MethodPost, "/api/v1/readers/batch", map[string]any{"post_ids": []string{postID}})
+	request.Header.Set(mattermostUserIDHeader, requestUserID)
+	response := httptest.NewRecorder()
+
+	plugin.ServeHTTP(nil, response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.NotContains(t, response.Body.String(), "user_id")
+	require.NotContains(t, response.Body.String(), readerUserID)
+	require.False(t, plugin.isConfigurationDirty())
 
 	api.AssertExpectations(t)
 }

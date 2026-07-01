@@ -24,7 +24,7 @@ func TestPublishReadReceiptUpdatedHidesUserIDWhenReaderNamesDisabled(t *testing.
 	api.On("PublishWebSocketEvent", websocketEventReadReceiptUpdated, mock.MatchedBy(func(payload map[string]any) bool {
 		_, hasUserID := payload["user_id"]
 		return !hasUserID &&
-			payload["scope_type"] == ScopeTypeChannel &&
+			payload["scope_type"] == string(ScopeTypeChannel) &&
 			payload["scope_id"] == channelID &&
 			payload["channel_id"] == channelID &&
 			payload["post_id"] == postID &&

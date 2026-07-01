@@ -245,6 +245,23 @@ describe('Plugin read reaction behavior', () => {
             window.removeEventListener(READ_RECEIPT_UPDATED_BROWSER_EVENT, readReceiptListener);
             window.removeEventListener(READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT, configChangedListener);
         });
+
+        it('registers DOM fallback root component when post footer registration is unavailable', async () => {
+            mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
+            const {registry} = createRegistry();
+            delete (registry as any).registerPostFooterComponent;
+            const {store} = createStore();
+            const plugin = new Plugin();
+
+            await plugin.initialize(registry, store);
+
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
+            expect(registry.registerRootComponent).toHaveBeenCalledWith(expect.any(Function));
+
+            plugin.uninitialize();
+
+            expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id');
+        });
     });
 
     describe('multiple_channels_viewed', () => {

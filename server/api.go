@@ -64,10 +64,7 @@ func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Req
 }
 
 func (p *Plugin) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
-	configuration := p.getConfiguration()
-	if configuration == nil {
-		configuration = defaultConfiguration()
-	}
+	configuration := p.getFreshConfiguration()
 	writeJSON(w, http.StatusOK, configuration)
 }
 
@@ -154,18 +151,25 @@ func (p *Plugin) handlePostReadersBatch(w http.ResponseWriter, r *http.Request) 
 	posts := make(map[string]postReadersResponse, len(postIDs))
 	now := model.GetMillis()
 	for _, postID := range postIDs {
-		post, getPostErr := p.getPost(postID)
-		if getPostErr != nil {
-			continue
-		}
-		if memberErr := p.ensureChannelMember(userID, post.ChannelId); memberErr != nil {
-			continue
-		}
-
 		index, err := store.GetPostReaders(postID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load readers")
 			return
+		}
+
+		channelID := ""
+		if index != nil {
+			channelID = index.ChannelID
+		}
+		if channelID == "" {
+			post, getPostErr := p.getPost(postID)
+			if getPostErr != nil {
+				continue
+			}
+			channelID = post.ChannelId
+		}
+		if memberErr := p.ensureChannelMember(userID, channelID); memberErr != nil {
+			continue
 		}
 
 		snapshots := buildReaderSnapshots(index, configuration.RetentionDays, now)

@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/mattermost/mattermost/server/public/model"
 )
 
 type ReadReceiptMode string
@@ -22,9 +27,12 @@ const (
 	maximumMaxReadersPerPost   = 200
 	maximumRetentionDays       = 3650
 	maximumMirrorEmojiNameSize = 64
+	localModeConfigLoadTimeout = 2 * time.Second
 )
 
 var mirrorEmojiNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_+\-]+$`)
+
+var localModeSocketPath = model.LocalModeSocketPath
 
 type configuration struct {
 	ReadReceiptMode          ReadReceiptMode `json:"readReceiptMode"`
@@ -39,6 +47,7 @@ type configuration struct {
 
 type pluginConfigAPI interface {
 	GetPluginConfig() map[string]any
+	LoadPluginConfiguration(dest any) error
 }
 
 func defaultConfiguration() *configuration {
@@ -60,7 +69,12 @@ func loadConfiguration(api pluginConfigAPI) (*configuration, error) {
 		return configuration, nil
 	}
 
-	if err := applyRawConfiguration(configuration, api.GetPluginConfig()); err != nil {
+	raw, err := loadRawPluginConfiguration(api)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := applyRawConfiguration(configuration, raw); err != nil {
 		return nil, err
 	}
 
@@ -69,6 +83,65 @@ func loadConfiguration(api pluginConfigAPI) (*configuration, error) {
 	}
 
 	return configuration, nil
+}
+
+func loadRawPluginConfiguration(api pluginConfigAPI) (map[string]any, error) {
+	// Prefer the local-mode REST config when available: the System Console can
+	// persist a fresh lowercase key while plugin-scoped config APIs still expose
+	// the old in-memory value for a short-lived/stale plugin runtime.
+	if raw, ok := loadRawPluginConfigurationFromLocalMode(); ok {
+		return raw, nil
+	}
+
+	// GetPluginConfig reads the plugin's persisted settings without going through
+	// GetConfig()->PluginSettings.Plugins, which can lag after /api/v4/config/patch
+	// in plugin runtime. It also preserves raw key spelling so the plugin can keep
+	// deterministic lowercase-over-camelCase precedence; Mattermost's
+	// LoadPluginConfiguration lowercases plugin keys before unmarshalling.
+	if raw := api.GetPluginConfig(); raw != nil {
+		return raw, nil
+	}
+
+	var raw map[string]any
+	if err := api.LoadPluginConfiguration(&raw); err != nil {
+		return nil, err
+	}
+
+	return raw, nil
+}
+
+func loadRawPluginConfigurationFromLocalMode() (map[string]any, bool) {
+	if localModeSocketPath == "" {
+		return nil, false
+	}
+
+	info, err := os.Stat(localModeSocketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), localModeConfigLoadTimeout)
+	defer cancel()
+
+	config, response, err := model.NewAPIv4SocketClient(localModeSocketPath).GetConfig(ctx)
+	if err != nil || response == nil || response.StatusCode >= 400 {
+		return nil, false
+	}
+
+	raw := rawPluginConfiguration(config)
+	if raw == nil {
+		return nil, false
+	}
+
+	return raw, true
+}
+
+func rawPluginConfiguration(config *model.Config) map[string]any {
+	if config == nil || manifest == nil || config.PluginSettings.Plugins == nil {
+		return nil
+	}
+
+	return config.PluginSettings.Plugins[manifest.Id]
 }
 
 func (c *configuration) Clone() *configuration {
@@ -85,7 +158,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		return nil
 	}
 
-	if value, ok := raw["readReceiptMode"]; ok {
+	if value, ok := rawConfigurationValue(raw, "readReceiptMode"); ok {
 		stringValue, err := asString("readReceiptMode", value)
 		if err != nil {
 			return err
@@ -93,7 +166,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.ReadReceiptMode = ReadReceiptMode(stringValue)
 	}
 
-	if value, ok := raw["mirrorEmojiName"]; ok {
+	if value, ok := rawConfigurationValue(raw, "mirrorEmojiName"); ok {
 		stringValue, err := asString("mirrorEmojiName", value)
 		if err != nil {
 			return err
@@ -101,7 +174,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.MirrorEmojiName = stringValue
 	}
 
-	if value, ok := raw["mirrorReactionsEnabled"]; ok {
+	if value, ok := rawConfigurationValue(raw, "mirrorReactionsEnabled"); ok {
 		boolValue, err := asBool("mirrorReactionsEnabled", value)
 		if err != nil {
 			return err
@@ -109,7 +182,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.MirrorReactionsEnabled = boolValue
 	}
 
-	if value, ok := raw["hideMirrorReactionsInWeb"]; ok {
+	if value, ok := rawConfigurationValue(raw, "hideMirrorReactionsInWeb"); ok {
 		boolValue, err := asBool("hideMirrorReactionsInWeb", value)
 		if err != nil {
 			return err
@@ -117,7 +190,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.HideMirrorReactionsInWeb = boolValue
 	}
 
-	if value, ok := raw["fallbackToStandardEyes"]; ok {
+	if value, ok := rawConfigurationValue(raw, "fallbackToStandardEyes"); ok {
 		boolValue, err := asBool("fallbackToStandardEyes", value)
 		if err != nil {
 			return err
@@ -125,7 +198,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.FallbackToStandardEyes = boolValue
 	}
 
-	if value, ok := raw["showReaderNames"]; ok {
+	if value, ok := rawConfigurationValue(raw, "showReaderNames"); ok {
 		boolValue, err := asBool("showReaderNames", value)
 		if err != nil {
 			return err
@@ -133,7 +206,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.ShowReaderNames = boolValue
 	}
 
-	if value, ok := raw["retentionDays"]; ok {
+	if value, ok := rawConfigurationValue(raw, "retentionDays"); ok {
 		intValue, err := asInt("retentionDays", value)
 		if err != nil {
 			return err
@@ -141,7 +214,7 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 		configuration.RetentionDays = intValue
 	}
 
-	if value, ok := raw["maxReadersPerPost"]; ok {
+	if value, ok := rawConfigurationValue(raw, "maxReadersPerPost"); ok {
 		intValue, err := asInt("maxReadersPerPost", value)
 		if err != nil {
 			return err
@@ -150,6 +223,16 @@ func applyRawConfiguration(configuration *configuration, raw map[string]any) err
 	}
 
 	return nil
+}
+
+func rawConfigurationValue(raw map[string]any, key string) (any, bool) {
+	lowercaseKey := strings.ToLower(key)
+	if value, ok := raw[lowercaseKey]; ok {
+		return value, true
+	}
+
+	value, ok := raw[key]
+	return value, ok
 }
 
 func normalizeConfiguration(configuration *configuration) error {
