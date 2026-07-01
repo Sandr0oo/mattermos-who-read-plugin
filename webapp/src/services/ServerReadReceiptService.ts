@@ -2,6 +2,7 @@ import manifest from '@/manifest';
 
 import {ServerReadReceiptConfigResponse} from '../config/ReadReceiptConfig';
 import Logger from '../utils/Logger';
+import {isValidMattermostId} from '../utils/MattermostIds';
 
 export const SERVER_READ_RECEIPT_API_PREFIX = `/plugins/${manifest.id}/api/v1`;
 
@@ -102,7 +103,7 @@ export default class ServerReadReceiptService {
     }
 
     async fetchReaders(postIds: string[]): Promise<ReadersBatchResponse> {
-        const uniquePostIds = Array.from(new Set(postIds.filter(Boolean)));
+        const uniquePostIds = Array.from(new Set(postIds.filter(isValidMattermostId)));
         if (uniquePostIds.length === 0) {
             return {posts: {}, max_readers_per_post: 0};
         }

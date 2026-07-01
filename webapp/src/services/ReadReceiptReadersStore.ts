@@ -1,3 +1,5 @@
+import {isValidMattermostId} from '../utils/MattermostIds';
+
 import ServerReadReceiptService, {ReaderInfo} from './ServerReadReceiptService';
 
 export interface CachedPostReaders {
@@ -27,7 +29,7 @@ export function clearReadReceiptReadersCache(postIds?: string[]): void {
 }
 
 export function fetchReadReceiptReaders(postId: string): Promise<CachedPostReaders> {
-    if (!postId) {
+    if (!isValidMattermostId(postId)) {
         return Promise.resolve(EMPTY_READERS);
     }
 
@@ -48,7 +50,7 @@ export function fetchReadReceiptReaders(postId: string): Promise<CachedPostReade
 }
 
 async function flushPendingReaders(): Promise<void> {
-    const postIds = Array.from(pendingRequests.keys());
+    const postIds = Array.from(pendingRequests.keys()).filter(isValidMattermostId);
     const requests = new Map(pendingRequests);
     pendingRequests.clear();
     flushTimer = null;

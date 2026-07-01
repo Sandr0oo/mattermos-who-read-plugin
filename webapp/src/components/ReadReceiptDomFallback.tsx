@@ -6,6 +6,7 @@ import {
     ReadReceiptUpdatedEventDetail,
 } from '../events/ReadReceiptEvents';
 import {clearReadReceiptReadersCache, fetchReadReceiptReaders} from '../services/ReadReceiptReadersStore';
+import {isValidMattermostId} from '../utils/MattermostIds';
 
 import {
     READ_RECEIPT_INDICATOR_CLASS,
@@ -106,7 +107,7 @@ function extractPostId(postElement: Element): string | null {
     }
 
     const postId = elementId.slice('post_'.length);
-    return postId || null;
+    return isValidMattermostId(postId) ? postId : null;
 }
 
 async function updatePostReadReceiptIndicator(postElement: Element): Promise<void> {

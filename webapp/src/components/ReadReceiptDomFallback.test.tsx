@@ -14,9 +14,11 @@ jest.mock('../services/ReadReceiptReadersStore', () => ({
 }));
 
 const fetchReadReceiptReadersMock = fetchReadReceiptReaders as jest.Mock;
+const postAID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
+const postBID = 'bbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 function readReadersForTest(postId: string) {
-    if (postId === 'postA') {
+    if (postId === postAID) {
         return Promise.resolve({
             count: 2,
             readers: [
@@ -37,17 +39,22 @@ describe('ReadReceiptDomFallback', () => {
 
     it('injects, updates and removes fallback reader indicators in Mattermost post DOM', async () => {
         document.body.innerHTML = `
-            <div class="post" data-testid="postView" id="post_postA">
+            <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
                     <div class="post__body">
-                        <div id="postA_message">message A</div>
+                        <div id="${postAID}_message">message A</div>
                     </div>
                 </div>
             </div>
-            <div class="post" data-testid="postView" id="post_postB">
+            <div class="post" data-testid="postView" id="post_invalid_id">
                 <div class="post__content">
-                    <span class="who-read-readers" data-who-read-fallback-indicator="true" data-who-read-post-id="postB">✓ 1</span>
-                    <div id="postB_message">message B</div>
+                    <div id="invalid_id_message">not a real post</div>
+                </div>
+            </div>
+            <div class="post" data-testid="postView" id="post_${postBID}">
+                <div class="post__content">
+                    <span class="who-read-readers" data-who-read-fallback-indicator="true" data-who-read-post-id="${postBID}">✓ 1</span>
+                    <div id="${postBID}_message">message B</div>
                 </div>
             </div>
         `;
@@ -56,12 +63,13 @@ describe('ReadReceiptDomFallback', () => {
         await scanReadReceiptDomFallback();
         await scanReadReceiptDomFallback();
 
-        const postA = document.getElementById('post_postA') as HTMLElement;
+        const postA = document.getElementById(`post_${postAID}`) as HTMLElement;
         const indicators = postA.querySelectorAll('.who-read-readers[data-who-read-fallback-indicator="true"]');
         expect(indicators).toHaveLength(1);
         expect(indicators[0].textContent).toBe('✓ 2');
         expect(indicators[0].getAttribute('title')).toBe('Прочитали: Bob, Alice Reader');
         expect(indicators[0].getAttribute('aria-label')).toBe('Прочитали: Bob, Alice Reader');
-        expect(document.querySelector('#post_postB .who-read-readers')).toBeNull();
+        expect(document.querySelector(`#post_${postBID} .who-read-readers`)).toBeNull();
+        expect(fetchReadReceiptReadersMock).not.toHaveBeenCalledWith('invalid_id');
     });
 });

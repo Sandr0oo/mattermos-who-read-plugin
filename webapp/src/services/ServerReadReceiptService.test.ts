@@ -5,6 +5,8 @@ import Logger from '../utils/Logger';
 
 import ServerReadReceiptService, {SERVER_READ_RECEIPT_API_PREFIX} from './ServerReadReceiptService';
 
+const postID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 jest.mock('@/manifest', () => ({
     id: 'com.mattermost.who-read-plugin',
     version: 'test',
@@ -94,13 +96,23 @@ describe('ServerReadReceiptService', () => {
         }));
         (global as any).fetch = fetchMock;
 
-        await new ServerReadReceiptService().fetchReaders(['post-id', 'post-id', '']);
+        await new ServerReadReceiptService().fetchReaders([postID, postID, '', 'invalid_id']);
 
         expect(fetchMock).toHaveBeenCalledWith(`${SERVER_READ_RECEIPT_API_PREFIX}/readers/batch`, expect.objectContaining({
             credentials: 'same-origin',
             method: 'POST',
         }));
-        expectFetchBody(fetchMock, {post_ids: ['post-id']});
+        expectFetchBody(fetchMock, {post_ids: [postID]});
+    });
+
+    it('does not call readers endpoint when every post id is invalid', async () => {
+        const fetchMock = jest.fn(() => createFetchResponse({max_readers_per_post: 50, posts: {}}));
+        (global as any).fetch = fetchMock;
+
+        const response = await new ServerReadReceiptService().fetchReaders(['', 'invalid_id']);
+
+        expect(response).toEqual({posts: {}, max_readers_per_post: 0});
+        expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('logs and rethrows failed requests', async () => {
