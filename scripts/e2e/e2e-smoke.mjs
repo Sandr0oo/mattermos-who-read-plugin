@@ -222,21 +222,23 @@ async function waitForSystemPluginMode(token, targetMode, timeoutMs = 10000) {
     return {matched: false, config: lastConfig, elapsed: Date.now() - startedAt, error: lastError};
 }
 
-async function restoreLegacyReadReceiptMode(token) {
-    await patchPluginConfig(token, {readReceiptMode: 'legacy_reactions'});
-    let runtimeResult = await waitForPluginRuntimeMode(token, 'legacy_reactions', 10000);
-    let systemResult = await waitForSystemPluginMode(token, 'legacy_reactions', 10000);
+async function restoreReadReceiptConfig(token, pluginConfig, fallbackMode = 'legacy_reactions') {
+    const configToRestore = Object.keys(pluginConfig || {}).length > 0 ? pluginConfig : {readReceiptMode: fallbackMode};
+    const targetMode = getEffectivePersistedReadReceiptMode(configToRestore) || fallbackMode;
+    await patchPluginConfig(token, configToRestore);
+    let runtimeResult = await waitForPluginRuntimeMode(token, targetMode, 10000);
+    let systemResult = await waitForSystemPluginMode(token, targetMode, 10000);
 
     if (!runtimeResult.matched) {
         mmctlPluginDisable();
         await new Promise((r) => setTimeout(r, 2000));
         mmctlPluginEnable();
         await new Promise((r) => setTimeout(r, 2000));
-        runtimeResult = await waitForPluginRuntimeMode(token, 'legacy_reactions', 10000);
-        systemResult = await waitForSystemPluginMode(token, 'legacy_reactions', 10000);
+        runtimeResult = await waitForPluginRuntimeMode(token, targetMode, 10000);
+        systemResult = await waitForSystemPluginMode(token, targetMode, 10000);
     }
 
-    return {runtimeResult, systemResult};
+    return {runtimeResult, systemResult, targetMode};
 }
 
 async function patchPluginConfig(token, pluginConfig) {
@@ -463,6 +465,9 @@ async function runTests() {
 
     const adminSession = await loginViaApi(ADMIN_EMAIL, ADMIN_PASS);
     const adminToken = adminSession.token;
+    const initialSystemPluginConfig = await getSystemPluginConfig(adminToken);
+    const initialRuntimeConfig = await getPluginConfigViaApi(adminToken).catch(() => ({}));
+    const initialReadReceiptMode = getEffectivePersistedReadReceiptMode(initialSystemPluginConfig) || initialRuntimeConfig.readReceiptMode || 'legacy_reactions';
 
     // =====================================================
     // TEST 1: Plugin config API returns valid config
@@ -1201,17 +1206,18 @@ run().catch((err) => {
             recordResult('Server-side read receipt browser scenario', false, formatExecError(err));
         } finally {
             try {
-                const restoreResult = await restoreLegacyReadReceiptMode(adminToken);
+                const restoreResult = await restoreReadReceiptConfig(adminToken, initialSystemPluginConfig, initialReadReceiptMode);
                 const runtimeMode = restoreResult.runtimeResult.config?.readReceiptMode;
                 const systemMode = getEffectivePersistedReadReceiptMode(restoreResult.systemResult.config);
                 recordResult(
-                    'Restored legacy_reactions after server-side read receipt test',
-                    Boolean(runtimeMode === 'legacy_reactions' && systemMode === 'legacy_reactions'),
+                    'Restored initial read receipt config after server-side test',
+                    Boolean(runtimeMode === restoreResult.targetMode && systemMode === restoreResult.targetMode),
                     `runtime=${runtimeMode || 'missing'}, system=${systemMode || 'missing'}, ` +
+                        `target=${restoreResult.targetMode}, ` +
                         `runtime_wait=${restoreResult.runtimeResult.elapsed}ms, system_wait=${restoreResult.systemResult.elapsed}ms`,
                 );
             } catch (err) {
-                recordResult('Restored legacy_reactions after server-side read receipt test', false, err.message);
+                recordResult('Restored initial read receipt config after server-side test', false, err.message);
             }
         }
     }
@@ -1583,8 +1589,8 @@ run().catch((err) => {
             recordResult('System Console browser test', false, formatExecError(err));
         } finally {
             try {
-                await patchPluginConfig(adminToken, {readReceiptMode: 'legacy_reactions'});
-                console.log('RESULT:restored_config:legacy_reactions');
+                const restoreResult = await restoreReadReceiptConfig(adminToken, initialSystemPluginConfig, initialReadReceiptMode);
+                console.log('RESULT:restored_config:' + restoreResult.targetMode);
             } catch (err) {
                 console.log('RESULT:restore_config_error:' + truncate(err.message, 200));
             }
