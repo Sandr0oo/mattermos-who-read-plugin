@@ -15,7 +15,7 @@ import {
     buildReadReceiptTitle,
 } from './ReadReceiptIndicatorDisplay';
 
-const POST_SELECTOR = '.post[data-testid="postView"][id^="post_"]';
+const POST_SELECTOR = '.post[data-testid="postView"][id^="post_"], .post[data-testid="rhsPostView"][id^="rhsPost_"]';
 const FALLBACK_INDICATOR_ATTRIBUTE = 'data-who-read-fallback-indicator';
 const POST_ID_ATTRIBUTE = 'data-who-read-post-id';
 const FALLBACK_INDICATOR_SELECTOR = `span.${READ_RECEIPT_INDICATOR_CLASS}[${FALLBACK_INDICATOR_ATTRIBUTE}="true"]`;
@@ -102,11 +102,16 @@ export function removeReadReceiptDomFallbackIndicators(root: ParentNode = docume
 
 function extractPostId(postElement: Element): string | null {
     const elementId = postElement.id || '';
-    if (!elementId.startsWith('post_')) {
+    let postId = '';
+
+    if (elementId.startsWith('rhsPost_')) {
+        postId = elementId.slice('rhsPost_'.length);
+    } else if (elementId.startsWith('post_')) {
+        postId = elementId.slice('post_'.length);
+    } else {
         return null;
     }
 
-    const postId = elementId.slice('post_'.length);
     return isValidMattermostId(postId) ? postId : null;
 }
 
@@ -130,6 +135,11 @@ async function updatePostReadReceiptIndicator(postElement: Element): Promise<voi
 
 function syncPostReadReceiptIndicator(postElement: Element, postId: string, count: number, readers: Parameters<typeof buildReadReceiptTitle>[1]): void {
     if (count <= 0) {
+        removePostFallbackIndicators(postElement);
+        return;
+    }
+
+    if (hasVisibleNonFallbackIndicator(postElement)) {
         removePostFallbackIndicators(postElement);
         return;
     }
@@ -165,8 +175,27 @@ function syncPostReadReceiptIndicator(postElement: Element, postId: string, coun
     }
 
     if (indicator.parentElement !== target) {
-        target.appendChild(indicator);
+        insertIndicatorIntoTarget(target, indicator);
     }
+}
+
+function hasVisibleNonFallbackIndicator(postElement: Element): boolean {
+    return Array.from(postElement.querySelectorAll(`.${READ_RECEIPT_INDICATOR_CLASS}`)).some((indicator) => {
+        if (indicator.getAttribute(FALLBACK_INDICATOR_ATTRIBUTE) === 'true') {
+            return false;
+        }
+
+        if (!(indicator instanceof HTMLElement)) {
+            return false;
+        }
+
+        const style = window.getComputedStyle(indicator);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            return false;
+        }
+
+        return indicator.offsetParent !== null || indicator.getClientRects().length > 0;
+    });
 }
 
 function findIndicatorTarget(postElement: Element, postId: string): HTMLElement | null {
@@ -188,6 +217,33 @@ function findIndicatorTarget(postElement: Element, postId: string): HTMLElement 
     }
 
     return postElement instanceof HTMLElement ? postElement : null;
+}
+
+function insertIndicatorIntoTarget(target: HTMLElement, indicator: HTMLSpanElement): void {
+    // In Mattermost 9.11, the reactions container is .post__body-reactions-acks (a flex row).
+    // Always place the indicator inside this container to avoid empty-space issues.
+    const reactionsAcks = target.querySelector('.post__body-reactions-acks');
+    const reactionList = target.querySelector('.post-reaction-list, .reaction-list');
+
+    // Preferred: insert after the reaction list, inside the reactions container.
+    if (reactionsAcks && reactionList && reactionList.parentElement === reactionsAcks) {
+        reactionsAcks.insertBefore(indicator, reactionList.nextSibling);
+        return;
+    }
+
+    // No reaction list — insert as first child of the reactions container.
+    if (reactionsAcks instanceof HTMLElement) {
+        reactionsAcks.insertBefore(indicator, reactionsAcks.firstChild);
+        return;
+    }
+
+    // Legacy DOM fallback: try .reaction-list, then append to target.
+    if (reactionList?.parentElement) {
+        reactionList.parentElement.insertBefore(indicator, reactionList.nextSibling);
+        return;
+    }
+
+    target.appendChild(indicator);
 }
 
 function removePostFallbackIndicators(postElement: Element): void {

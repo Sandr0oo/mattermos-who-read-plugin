@@ -4,6 +4,7 @@ export default class ReadState {
     private currentOpenThreadId: string | null = null;
     private windowIsActive = false;
     private isProcessingThread = false;
+    private deferredChannels: Array<{channelId: string; viewedAt?: number}> = [];
 
     setWindowIsActive(active: boolean): void {
         this.windowIsActive = active;
@@ -27,6 +28,16 @@ export default class ReadState {
 
     isProcessing(): boolean {
         return this.isProcessingThread;
+    }
+
+    addDeferredChannel(channelId: string, viewedAt?: number): void {
+        this.deferredChannels.push({channelId, viewedAt});
+    }
+
+    getDeferredChannelsAndClear(): Array<{channelId: string; viewedAt?: number}> {
+        const channels = [...this.deferredChannels];
+        this.deferredChannels = [];
+        return channels;
     }
 
     setLastReactedPost(channelId: string, postId: string): void {
@@ -55,5 +66,6 @@ export default class ReadState {
         this.currentOpenThreadId = null;
         this.windowIsActive = false;
         this.isProcessingThread = false;
+        this.deferredChannels = [];
     }
 }

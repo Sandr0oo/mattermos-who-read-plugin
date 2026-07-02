@@ -21,6 +21,33 @@ describe('ReadState', () => {
         expect(state.isPending('post-id')).toBe(true);
     });
 
+    it('stores and clears deferred channels', () => {
+        const state = new ReadState();
+
+        expect(state.getDeferredChannelsAndClear()).toEqual([]);
+
+        state.addDeferredChannel('channel-a', 123);
+        state.addDeferredChannel('channel-b', 456);
+
+        const channels = state.getDeferredChannelsAndClear();
+        expect(channels).toEqual([
+            {channelId: 'channel-a', viewedAt: 123},
+            {channelId: 'channel-b', viewedAt: 456},
+        ]);
+
+        // Second call returns empty (was cleared)
+        expect(state.getDeferredChannelsAndClear()).toEqual([]);
+    });
+
+    it('clears deferred channels on clear()', () => {
+        const state = new ReadState();
+
+        state.addDeferredChannel('channel-a', 123);
+        state.clear();
+
+        expect(state.getDeferredChannelsAndClear()).toEqual([]);
+    });
+
     it('clears all in-memory state', () => {
         const state = new ReadState();
 

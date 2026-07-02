@@ -458,6 +458,605 @@ function getBrowserResultValue(lines, key) {
     return line ? line.substring(prefix.length) : undefined;
 }
 
+async function runBobBrowserReadReceiptScenario({bobSession, team, testMessage, postId}, timeoutMs = 150000) {
+    const browserScript = `
+import {chromium} from 'playwright';
+
+const MM_URL = ${JSON.stringify(MM_URL)};
+const TOKEN = ${JSON.stringify(bobSession.token)};
+const USER_ID = ${JSON.stringify(bobSession.userId)};
+const TEAM_NAME = ${JSON.stringify(team.name)};
+const CHANNEL_NAME = 'town-square';
+const TEST_MESSAGE = ${JSON.stringify(testMessage)};
+const POST_ID = ${JSON.stringify(postId)};
+const READ_STATE_PATH = '/plugins/${PLUGIN_ID}/api/v1/read-state';
+
+function safeResult(value, maxLength = 250) {
+    return String(value ?? '').replace(/\\s+/g, ' ').substring(0, maxLength);
+}
+
+async function bypassLanding(page, label) {
+    const viewInBrowser = page.getByText('View in Browser', {exact: true}).first();
+    const landingTextCount = await page.getByText('Where would you like to view this?', {exact: false}).count().catch(() => 0);
+    const viewButtonCount = await page.getByText('View in Browser', {exact: true}).count().catch(() => 0);
+    const isLanding = page.url().includes('/landing') || landingTextCount > 0 || viewButtonCount > 0;
+
+    if (!isLanding) {
+        console.log('RESULT:landing_bypass:' + label + ':not_needed:' + page.url());
+        return;
+    }
+
+    await viewInBrowser.waitFor({timeout: 15000});
+    await Promise.all([
+        page.waitForURL((url) => !url.pathname.includes('/landing'), {timeout: 15000}).catch(() => null),
+        viewInBrowser.click({timeout: 10000}),
+    ]);
+    await page.waitForLoadState('networkidle', {timeout: 30000}).catch(() => null);
+    await page.waitForTimeout(1000);
+    console.log('RESULT:landing_bypass:' + label + ':clicked:' + page.url());
+}
+
+function parseReadStatePostId(body) {
+    try {
+        return JSON.parse(body || '{}').last_read_post_id || 'missing';
+    } catch {
+        return 'invalid_json';
+    }
+}
+
+function indicatorPass(result) {
+    if (!result || !result.found || !result.visible) {
+        return false;
+    }
+    const textOk = /^✓\\s*[1-9]\\d*/.test(result.text || '');
+    const label = String(result.title || '') + ' ' + String(result.aria || '');
+    return textOk && label.includes('Прочитали');
+}
+
+async function findIndicatorOnPage(page) {
+    return page.evaluate(({testMessage}) => {
+        function clean(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim();
+        }
+
+        function isVisibleIndicator(indicator) {
+            const style = window.getComputedStyle(indicator);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return false;
+            }
+
+            return indicator.offsetParent !== null || indicator.getClientRects().length > 0;
+        }
+
+        function info(indicator, scopedBy) {
+            return {
+                found: true,
+                visible: isVisibleIndicator(indicator),
+                text: clean(indicator.textContent),
+                title: clean(indicator.getAttribute('title')),
+                aria: clean(indicator.getAttribute('aria-label')),
+                scopedBy,
+            };
+        }
+
+        function infoFromRoot(root, scopedBy) {
+            if (!root || !root.querySelector) {
+                return null;
+            }
+            const indicator = root.querySelector('.who-read-readers');
+            return indicator ? info(indicator, scopedBy) : null;
+        }
+
+        const roots = [];
+        const rootSelectors = [
+            '[data-testid="postView"]',
+            '.post',
+            '.post-list__item',
+            '[id^="post_"]',
+            '[id^="postListContent_"]',
+        ];
+        for (const selector of rootSelectors) {
+            for (const element of Array.from(document.querySelectorAll(selector))) {
+                if (String(element.textContent || '').includes(testMessage)) {
+                    roots.push(element);
+                }
+            }
+        }
+        roots.sort((a, b) => String(a.textContent || '').length - String(b.textContent || '').length);
+        for (const root of roots) {
+            const result = infoFromRoot(root, 'post_root');
+            if (result) {
+                return result;
+            }
+        }
+
+        const messageElements = Array.from(document.querySelectorAll('[id^="postMessageText_"], .post-message__text, .post__body, div, span, p'))
+            .filter((element) => String(element.textContent || '').includes(testMessage))
+            .sort((a, b) => String(a.textContent || '').length - String(b.textContent || '').length);
+        for (const messageElement of messageElements) {
+            let node = messageElement;
+            for (let depth = 0; node && depth < 6; depth++) {
+                const result = infoFromRoot(node, 'message_ancestor_' + depth);
+                if (result) {
+                    return result;
+                }
+                node = node.parentElement;
+            }
+        }
+
+        const allIndicators = Array.from(document.querySelectorAll('.who-read-readers'));
+        return {
+            found: false,
+            visible: false,
+            text: allIndicators.slice(0, 5).map((indicator) => clean(indicator.textContent)).join('|'),
+            title: allIndicators.slice(0, 5).map((indicator) => clean(indicator.getAttribute('title'))).join('|'),
+            aria: allIndicators.slice(0, 5).map((indicator) => clean(indicator.getAttribute('aria-label'))).join('|'),
+            scopedBy: 'not_scoped',
+            allIndicatorCount: allIndicators.length,
+        };
+    }, {testMessage: TEST_MESSAGE});
+}
+
+async function waitForIndicator(page, timeoutMs = 30000) {
+    const startedAt = Date.now();
+    let lastResult = null;
+    while (Date.now() - startedAt < timeoutMs) {
+        lastResult = await findIndicatorOnPage(page);
+        if (indicatorPass(lastResult)) {
+            lastResult.elapsed = Date.now() - startedAt;
+            return lastResult;
+        }
+
+        await page.waitForTimeout(1000);
+    }
+
+    return {...(lastResult || {found: false}), elapsed: Date.now() - startedAt};
+}
+
+async function waitForReadStateResponse(readStateResponses, timeoutMs = 30000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        if (readStateResponses.length > 0) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+}
+
+async function run() {
+    const browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    const context = await browser.newContext();
+    await context.addCookies([
+        {name: 'MMUSERID', value: USER_ID, url: MM_URL},
+        {name: 'MMAUTHTOKEN', value: TOKEN, url: MM_URL},
+        {name: 'MMCSRF', value: TOKEN, url: MM_URL},
+    ]);
+    const page = await context.newPage();
+
+    try {
+        const errors = [];
+        const readStateRequests = [];
+        const readStateResponses = [];
+
+        page.on('console', (msg) => {
+            if (msg.type() === 'error') {
+                errors.push(msg.text());
+            }
+        });
+        page.on('request', (request) => {
+            try {
+                const url = request.url();
+                if (request.method() === 'POST' && url.includes(READ_STATE_PATH)) {
+                    readStateRequests.push(request.postData() || '');
+                }
+            } catch {
+                // Best-effort diagnostic only.
+            }
+        });
+        page.on('response', (response) => {
+            try {
+                const request = response.request();
+                const url = response.url();
+                if (request.method() === 'POST' && url.includes(READ_STATE_PATH)) {
+                    readStateResponses.push(String(response.status()));
+                }
+            } catch {
+                // Best-effort diagnostic only.
+            }
+        });
+
+        await page.goto(MM_URL + '/' + TEAM_NAME + '/channels/' + CHANNEL_NAME, {
+            waitUntil: 'networkidle', timeout: 30000,
+        });
+        await page.waitForTimeout(1000);
+        await bypassLanding(page, 'channel');
+        await page.waitForURL((url) => url.pathname.includes('/channels/' + CHANNEL_NAME), {
+            timeout: 15000,
+        }).catch(() => null);
+
+        let channelReady = false;
+        try {
+            await page.waitForSelector('#post-list, .post-list-holder-by-time, .post-list__table, [data-testid="postView"], #app-content, .app__body', {
+                timeout: 30000,
+            });
+            channelReady = true;
+        } catch (err) {
+            console.log('RESULT:channel_ready_error:' + safeResult(err.message));
+        }
+
+        let messageVisible = false;
+        try {
+            const message = page.getByText(TEST_MESSAGE, {exact: false}).first();
+            await message.waitFor({timeout: 30000});
+            await message.scrollIntoViewIfNeeded({timeout: 5000}).catch(() => null);
+            messageVisible = true;
+        } catch {
+            messageVisible = false;
+        }
+
+        await waitForReadStateResponse(readStateResponses, 30000);
+        const indicatorResult = await waitForIndicator(page, 30000);
+
+        const readStatePostIds = readStateRequests.map(parseReadStatePostId);
+        console.log('RESULT:channel_url:' + page.url());
+        console.log('RESULT:channel_ready:' + (channelReady ? 'found' : 'not_found'));
+        console.log('RESULT:message_visible:' + (messageVisible ? 'found' : 'not_found'));
+        console.log('RESULT:read_state_request_count:' + readStateRequests.length);
+        console.log('RESULT:read_state_post_ids:' + (readStatePostIds.length > 0 ? readStatePostIds.join('|') : 'not_observed'));
+        console.log('RESULT:read_state_matching_post:' + (readStatePostIds.includes(POST_ID) ? 'found' : 'not_found'));
+        console.log('RESULT:read_state_response_statuses:' + (readStateResponses.length > 0 ? readStateResponses.join('|') : 'not_observed'));
+        console.log('RESULT:indicator_found:' + (indicatorPass(indicatorResult) ? 'found' : 'not_found'));
+        console.log('RESULT:indicator_visible:' + (indicatorResult.visible ? 'true' : 'false'));
+        console.log('RESULT:indicator_text:' + safeResult(indicatorResult.text));
+        console.log('RESULT:indicator_title:' + safeResult(indicatorResult.title));
+        console.log('RESULT:indicator_aria:' + safeResult(indicatorResult.aria));
+        console.log('RESULT:indicator_scoped_by:' + safeResult(indicatorResult.scopedBy));
+        console.log('RESULT:indicator_elapsed:' + safeResult(indicatorResult.elapsed));
+        console.log('RESULT:indicator_all_count:' + safeResult(indicatorResult.allIndicatorCount || 0));
+        console.log('RESULT:console_errors:' + errors.length);
+        if (errors.length > 0) {
+            errors.slice(0, 5).forEach((error) => console.log('RESULT:error:' + safeResult(error, 200)));
+        }
+    } finally {
+        await page.close();
+        await context.close();
+        await browser.close();
+    }
+}
+
+run().catch((err) => {
+    console.error('Browser server-side read receipt test error:', err.message);
+    process.exit(1);
+});
+`;
+
+    const output = await runBrowserScript(browserScript, timeoutMs);
+    const lines = getBrowserResultLines(output);
+    printBrowserResultLines(lines);
+
+    const channelResult = getBrowserResultValue(lines, 'channel_ready');
+    const channelUrlResult = getBrowserResultValue(lines, 'channel_url');
+    const messageResult = getBrowserResultValue(lines, 'message_visible');
+    const readStateRequestCount = Number(getBrowserResultValue(lines, 'read_state_request_count') || 0);
+    const readStatePostIds = getBrowserResultValue(lines, 'read_state_post_ids') || 'not_observed';
+    const readStateMatchingPost = getBrowserResultValue(lines, 'read_state_matching_post') === 'found';
+    const readStateResponseStatuses = getBrowserResultValue(lines, 'read_state_response_statuses') || 'not_observed';
+    const readStateResponseOk = readStateResponseStatuses.split('|').includes('200');
+    const indicatorFound = getBrowserResultValue(lines, 'indicator_found') === 'found';
+    const indicatorVisible = getBrowserResultValue(lines, 'indicator_visible') === 'true';
+    const indicatorText = getBrowserResultValue(lines, 'indicator_text') || '';
+    const indicatorTitle = getBrowserResultValue(lines, 'indicator_title') || '';
+    const indicatorAria = getBrowserResultValue(lines, 'indicator_aria') || '';
+    const indicatorScopedBy = getBrowserResultValue(lines, 'indicator_scoped_by') || '';
+    const indicatorTextOk = /^✓\s*[1-9]\d*/.test(indicatorText);
+    const indicatorLabelOk = `${indicatorTitle} ${indicatorAria}`.includes('Прочитали');
+
+    return {
+        lines,
+        channel: {
+            ok: Boolean(channelResult === 'found' && messageResult === 'found'),
+            details: [
+                `channel_url:${channelUrlResult || 'no_result'}`,
+                `channel_ready:${channelResult || 'no_result'}`,
+                `message_visible:${messageResult || 'no_result'}`,
+            ].join('; '),
+        },
+        readState: {
+            ok: Boolean(readStateRequestCount > 0 && readStateMatchingPost && readStateResponseOk),
+            requestCount: readStateRequestCount,
+            postIds: readStatePostIds,
+            responseStatuses: readStateResponseStatuses,
+            details: `requests=${readStateRequestCount}, post_ids=${readStatePostIds}, responses=${readStateResponseStatuses}`,
+        },
+        indicator: {
+            ok: Boolean(indicatorFound && indicatorVisible && indicatorTextOk && indicatorLabelOk),
+            found: indicatorFound,
+            visible: indicatorVisible,
+            text: indicatorText,
+            title: indicatorTitle,
+            aria: indicatorAria,
+            scopedBy: indicatorScopedBy,
+            details: `found=${indicatorFound}, visible=${indicatorVisible}, text=${indicatorText || 'missing'}, title=${indicatorTitle || 'missing'}, ` +
+                `aria=${indicatorAria || 'missing'}, scoped_by=${indicatorScopedBy || 'missing'}, ` +
+                `elapsed=${getBrowserResultValue(lines, 'indicator_elapsed') || 'no_result'}ms`,
+        },
+    };
+}
+
+async function runActiveChannelReadReceiptScenario({aliceSession, bobSession, team, channel, testMessage}, timeoutMs = 150000) {
+    const browserScript = `
+import {chromium} from 'playwright';
+
+const MM_URL = ${JSON.stringify(MM_URL)};
+const ALICE_TOKEN = ${JSON.stringify(aliceSession.token)};
+const BOB_TOKEN = ${JSON.stringify(bobSession.token)};
+const BOB_USER_ID = ${JSON.stringify(bobSession.userId)};
+const TEAM_NAME = ${JSON.stringify(team.name)};
+const CHANNEL_ID = ${JSON.stringify(channel.id)};
+const CHANNEL_NAME = 'town-square';
+const TEST_MESSAGE = ${JSON.stringify(testMessage)};
+const READ_STATE_PATH = '/plugins/${PLUGIN_ID}/api/v1/read-state';
+
+function safeResult(value, maxLength = 250) {
+    return String(value ?? '').replace(/\\s+/g, ' ').substring(0, maxLength);
+}
+
+async function bypassLanding(page, label) {
+    const viewInBrowser = page.getByText('View in Browser', {exact: true}).first();
+    const isLanding = page.url().includes('/landing') ||
+        await page.getByText('Where would you like to view this?', {exact: false}).count().catch(() => 0) > 0 ||
+        await page.getByText('View in Browser', {exact: true}).count().catch(() => 0) > 0;
+    if (!isLanding) {
+        console.log('RESULT:active_landing_bypass:' + label + ':not_needed:' + page.url());
+        return;
+    }
+
+    await viewInBrowser.waitFor({timeout: 15000});
+    await Promise.all([
+        page.waitForURL((url) => !url.pathname.includes('/landing'), {timeout: 15000}).catch(() => null),
+        viewInBrowser.click({timeout: 10000}),
+    ]);
+    await page.waitForLoadState('networkidle', {timeout: 30000}).catch(() => null);
+    await page.waitForTimeout(1000);
+    console.log('RESULT:active_landing_bypass:' + label + ':clicked:' + page.url());
+}
+
+function parseReadStatePostId(body) {
+    try {
+        return JSON.parse(body || '{}').last_read_post_id || 'missing';
+    } catch {
+        return 'invalid_json';
+    }
+}
+
+function indicatorPass(result) {
+    if (!result || !result.found || !result.visible) {
+        return false;
+    }
+    const textOk = /^✓\\s*[1-9]\\d*/.test(result.text || '');
+    const label = String(result.title || '') + ' ' + String(result.aria || '');
+    return textOk && label.includes('Прочитали');
+}
+
+async function findIndicatorOnPage(page, postId) {
+    return page.evaluate((targetPostId) => {
+        function clean(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim();
+        }
+
+        function isVisibleIndicator(indicator) {
+            const style = window.getComputedStyle(indicator);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return false;
+            }
+
+            return indicator.offsetParent !== null || indicator.getClientRects().length > 0;
+        }
+
+        const postRoot = document.getElementById('post_' + targetPostId);
+        const indicator = postRoot?.querySelector?.('.who-read-readers');
+        if (indicator) {
+            return {
+                found: true,
+                visible: isVisibleIndicator(indicator),
+                text: clean(indicator.textContent),
+                title: clean(indicator.getAttribute('title')),
+                aria: clean(indicator.getAttribute('aria-label')),
+                scopedBy: 'post_root',
+            };
+        }
+
+        const allIndicators = Array.from(document.querySelectorAll('.who-read-readers'));
+        return {
+            found: false,
+            visible: false,
+            text: allIndicators.slice(0, 5).map((node) => clean(node.textContent)).join('|'),
+            title: allIndicators.slice(0, 5).map((node) => clean(node.getAttribute('title'))).join('|'),
+            aria: allIndicators.slice(0, 5).map((node) => clean(node.getAttribute('aria-label'))).join('|'),
+            scopedBy: 'not_scoped',
+            allIndicatorCount: allIndicators.length,
+        };
+    }, postId);
+}
+
+async function waitForIndicator(page, postId, timeoutMs = 30000) {
+    const startedAt = Date.now();
+    let lastResult = null;
+    while (Date.now() - startedAt < timeoutMs) {
+        lastResult = await findIndicatorOnPage(page, postId);
+        if (indicatorPass(lastResult)) {
+            lastResult.elapsed = Date.now() - startedAt;
+            return lastResult;
+        }
+        await page.waitForTimeout(1000);
+    }
+    return {...(lastResult || {found: false}), elapsed: Date.now() - startedAt};
+}
+
+async function waitForReadStateResponse(readStateResponses, timeoutMs = 30000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        if (readStateResponses.length > 0) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+}
+
+async function run() {
+    const browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    const context = await browser.newContext();
+    await context.addCookies([
+        {name: 'MMUSERID', value: BOB_USER_ID, url: MM_URL},
+        {name: 'MMAUTHTOKEN', value: BOB_TOKEN, url: MM_URL},
+        {name: 'MMCSRF', value: BOB_TOKEN, url: MM_URL},
+    ]);
+    const page = await context.newPage();
+
+    try {
+        const errors = [];
+        const readStateRequests = [];
+        const readStateResponses = [];
+
+        page.on('console', (msg) => {
+            if (msg.type() === 'error') {
+                errors.push(msg.text());
+            }
+        });
+        page.on('request', (request) => {
+            try {
+                if (request.method() === 'POST' && request.url().includes(READ_STATE_PATH)) {
+                    readStateRequests.push(request.postData() || '');
+                }
+            } catch {
+                // Best-effort diagnostic only.
+            }
+        });
+        page.on('response', (response) => {
+            try {
+                const request = response.request();
+                if (request.method() === 'POST' && response.url().includes(READ_STATE_PATH)) {
+                    readStateResponses.push(String(response.status()));
+                }
+            } catch {
+                // Best-effort diagnostic only.
+            }
+        });
+
+        await page.goto(MM_URL + '/' + TEAM_NAME + '/channels/' + CHANNEL_NAME, {waitUntil: 'networkidle', timeout: 30000});
+        await page.waitForTimeout(1000);
+        await bypassLanding(page, 'active_channel');
+        await page.waitForSelector('#post-list, .post-list-holder-by-time, .post-list__table, [data-testid="postView"], #app-content, .app__body', {timeout: 30000});
+        await page.waitForTimeout(3000);
+
+        readStateRequests.length = 0;
+        readStateResponses.length = 0;
+
+        const createResponse = await fetch(MM_URL + '/api/v4/posts', {
+            method: 'POST',
+            headers: {Authorization: 'Bearer ' + ALICE_TOKEN, 'Content-Type': 'application/json'},
+            body: JSON.stringify({channel_id: CHANNEL_ID, message: TEST_MESSAGE}),
+        });
+        const post = await createResponse.json();
+        const postId = post.id || '';
+        console.log('RESULT:active_post_id:' + postId);
+        console.log('RESULT:active_create_post_status:' + createResponse.status);
+
+        let messageVisible = false;
+        try {
+            const message = page.getByText(TEST_MESSAGE, {exact: false}).first();
+            await message.waitFor({timeout: 30000});
+            await message.scrollIntoViewIfNeeded({timeout: 5000}).catch(() => null);
+            messageVisible = true;
+        } catch {
+            messageVisible = false;
+        }
+
+        await waitForReadStateResponse(readStateResponses, 30000);
+        const indicatorResult = await waitForIndicator(page, postId, 30000);
+        const readStatePostIds = readStateRequests.map(parseReadStatePostId);
+        console.log('RESULT:active_channel_url:' + page.url());
+        console.log('RESULT:active_message_visible:' + (messageVisible ? 'found' : 'not_found'));
+        console.log('RESULT:active_read_state_request_count:' + readStateRequests.length);
+        console.log('RESULT:active_read_state_post_ids:' + (readStatePostIds.length > 0 ? readStatePostIds.join('|') : 'not_observed'));
+        console.log('RESULT:active_read_state_matching_post:' + (readStatePostIds.includes(postId) ? 'found' : 'not_found'));
+        console.log('RESULT:active_read_state_response_statuses:' + (readStateResponses.length > 0 ? readStateResponses.join('|') : 'not_observed'));
+        console.log('RESULT:active_indicator_found:' + (indicatorPass(indicatorResult) ? 'found' : 'not_found'));
+        console.log('RESULT:active_indicator_visible:' + (indicatorResult.visible ? 'true' : 'false'));
+        console.log('RESULT:active_indicator_text:' + safeResult(indicatorResult.text));
+        console.log('RESULT:active_indicator_title:' + safeResult(indicatorResult.title));
+        console.log('RESULT:active_indicator_aria:' + safeResult(indicatorResult.aria));
+        console.log('RESULT:active_indicator_scoped_by:' + safeResult(indicatorResult.scopedBy));
+        console.log('RESULT:active_indicator_elapsed:' + safeResult(indicatorResult.elapsed));
+        console.log('RESULT:active_indicator_all_count:' + safeResult(indicatorResult.allIndicatorCount || 0));
+        console.log('RESULT:active_console_errors:' + errors.length);
+        if (errors.length > 0) {
+            errors.slice(0, 5).forEach((error) => console.log('RESULT:active_error:' + safeResult(error, 200)));
+        }
+    } finally {
+        await page.close();
+        await context.close();
+        await browser.close();
+    }
+}
+
+run().catch((err) => {
+    console.error('Active channel server-side read receipt test error:', err.message);
+    process.exit(1);
+});
+`;
+
+    const output = await runBrowserScript(browserScript, timeoutMs);
+    const lines = getBrowserResultLines(output);
+    printBrowserResultLines(lines);
+
+    const postId = getBrowserResultValue(lines, 'active_post_id') || '';
+    const createStatus = getBrowserResultValue(lines, 'active_create_post_status') || 'not_observed';
+    const messageVisible = getBrowserResultValue(lines, 'active_message_visible') === 'found';
+    const readStateRequestCount = Number(getBrowserResultValue(lines, 'active_read_state_request_count') || 0);
+    const readStatePostIds = getBrowserResultValue(lines, 'active_read_state_post_ids') || 'not_observed';
+    const readStateMatchingPost = getBrowserResultValue(lines, 'active_read_state_matching_post') === 'found';
+    const readStateResponseStatuses = getBrowserResultValue(lines, 'active_read_state_response_statuses') || 'not_observed';
+    const readStateResponseOk = readStateResponseStatuses.split('|').includes('200');
+    const indicatorFound = getBrowserResultValue(lines, 'active_indicator_found') === 'found';
+    const indicatorVisible = getBrowserResultValue(lines, 'active_indicator_visible') === 'true';
+    const indicatorText = getBrowserResultValue(lines, 'active_indicator_text') || '';
+    const indicatorTitle = getBrowserResultValue(lines, 'active_indicator_title') || '';
+    const indicatorAria = getBrowserResultValue(lines, 'active_indicator_aria') || '';
+    const indicatorScopedBy = getBrowserResultValue(lines, 'active_indicator_scoped_by') || '';
+    const indicatorTextOk = /^✓\s*[1-9]\d*/.test(indicatorText);
+    const indicatorLabelOk = `${indicatorTitle} ${indicatorAria}`.includes('Прочитали');
+
+    return {
+        lines,
+        postId,
+        createPost: {
+            ok: Boolean(postId && createStatus === '201'),
+            details: `post_id=${postId || 'missing'}, status=${createStatus}`,
+        },
+        channel: {
+            ok: messageVisible,
+            details: `message_visible=${messageVisible}, channel_url=${getBrowserResultValue(lines, 'active_channel_url') || 'no_result'}`,
+        },
+        readState: {
+            ok: Boolean(readStateRequestCount > 0 && readStateMatchingPost && readStateResponseOk),
+            details: `requests=${readStateRequestCount}, post_ids=${readStatePostIds}, responses=${readStateResponseStatuses}`,
+        },
+        indicator: {
+            ok: Boolean(indicatorFound && indicatorVisible && indicatorTextOk && indicatorLabelOk),
+            details: `found=${indicatorFound}, visible=${indicatorVisible}, text=${indicatorText || 'missing'}, title=${indicatorTitle || 'missing'}, ` +
+                `aria=${indicatorAria || 'missing'}, scoped_by=${indicatorScopedBy || 'missing'}, ` +
+                `elapsed=${getBrowserResultValue(lines, 'active_indicator_elapsed') || 'no_result'}ms`,
+        },
+    };
+}
+
 async function runTests() {
     console.log(`E2E smoke test for ${PLUGIN_ID}`);
     console.log(`Mattermost URL: ${MM_URL}`);
@@ -909,7 +1508,7 @@ function parseReadStatePostId(body) {
 }
 
 function indicatorPass(result) {
-    if (!result || !result.found) {
+    if (!result || !result.found || !result.visible) {
         return false;
     }
     const textOk = /^✓\\s*[1-9]\\d*/.test(result.text || '');
@@ -923,9 +1522,19 @@ async function findIndicatorOnPage(page) {
             return String(value || '').replace(/\\s+/g, ' ').trim();
         }
 
+        function isVisibleIndicator(indicator) {
+            const style = window.getComputedStyle(indicator);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return false;
+            }
+
+            return indicator.offsetParent !== null || indicator.getClientRects().length > 0;
+        }
+
         function info(indicator, scopedBy) {
             return {
                 found: true,
+                visible: isVisibleIndicator(indicator),
                 text: clean(indicator.textContent),
                 title: clean(indicator.getAttribute('title')),
                 aria: clean(indicator.getAttribute('aria-label')),
@@ -981,6 +1590,7 @@ async function findIndicatorOnPage(page) {
         const allIndicators = Array.from(document.querySelectorAll('.who-read-readers'));
         return {
             found: false,
+            visible: false,
             text: allIndicators.slice(0, 5).map((indicator) => clean(indicator.textContent)).join('|'),
             title: allIndicators.slice(0, 5).map((indicator) => clean(indicator.getAttribute('title'))).join('|'),
             aria: allIndicators.slice(0, 5).map((indicator) => clean(indicator.getAttribute('aria-label'))).join('|'),
@@ -1102,6 +1712,7 @@ async function run() {
         console.log('RESULT:read_state_matching_post:' + (readStatePostIds.includes(POST_ID) ? 'found' : 'not_found'));
         console.log('RESULT:read_state_response_statuses:' + (readStateResponses.length > 0 ? readStateResponses.join('|') : 'not_observed'));
         console.log('RESULT:indicator_found:' + (indicatorPass(indicatorResult) ? 'found' : 'not_found'));
+        console.log('RESULT:indicator_visible:' + (indicatorResult.visible ? 'true' : 'false'));
         console.log('RESULT:indicator_text:' + safeResult(indicatorResult.text));
         console.log('RESULT:indicator_title:' + safeResult(indicatorResult.title));
         console.log('RESULT:indicator_aria:' + safeResult(indicatorResult.aria));
@@ -1168,6 +1779,7 @@ run().catch((err) => {
                 );
 
                 const indicatorFound = getBrowserResultValue(lines, 'indicator_found') === 'found';
+                const indicatorVisible = getBrowserResultValue(lines, 'indicator_visible') === 'true';
                 const indicatorText = getBrowserResultValue(lines, 'indicator_text') || '';
                 const indicatorTitle = getBrowserResultValue(lines, 'indicator_title') || '';
                 const indicatorAria = getBrowserResultValue(lines, 'indicator_aria') || '';
@@ -1176,8 +1788,8 @@ run().catch((err) => {
                 const indicatorLabelOk = `${indicatorTitle} ${indicatorAria}`.includes('Прочитали');
                 recordResult(
                     'Read receipt indicator appears on fresh Alice post',
-                    Boolean(indicatorFound && indicatorTextOk && indicatorLabelOk),
-                    `found=${indicatorFound}, text=${indicatorText || 'missing'}, title=${indicatorTitle || 'missing'}, ` +
+                    Boolean(indicatorFound && indicatorVisible && indicatorTextOk && indicatorLabelOk),
+                    `found=${indicatorFound}, visible=${indicatorVisible}, text=${indicatorText || 'missing'}, title=${indicatorTitle || 'missing'}, ` +
                         `aria=${indicatorAria || 'missing'}, scoped_by=${indicatorScopedBy || 'missing'}, ` +
                         `elapsed=${getBrowserResultValue(lines, 'indicator_elapsed') || 'no_result'}ms`,
                 );
@@ -1202,6 +1814,60 @@ run().catch((err) => {
                     `server_config_ready=${serverConfigReady}, read_state_call_ok=${readStateServerCallOk}; ${details}`,
                 );
             }
+
+            const activeChannelTestMessage = `E2E active channel server read receipt ${Date.now()}`;
+            const activeBrowserResult = await runActiveChannelReadReceiptScenario({
+                aliceSession,
+                bobSession,
+                team,
+                channel,
+                testMessage: activeChannelTestMessage,
+            });
+
+            recordResult(
+                'Alice can post after Bob already has town-square open',
+                activeBrowserResult.createPost.ok,
+                activeBrowserResult.createPost.details,
+            );
+
+            recordResult(
+                'Bob active town-square browser sees new Alice post',
+                activeBrowserResult.channel.ok,
+                activeBrowserResult.channel.details,
+            );
+
+            recordResult(
+                'Bob active town-square browser calls POST /api/v1/read-state for new post',
+                activeBrowserResult.readState.ok,
+                activeBrowserResult.readState.details,
+            );
+
+            if (activeBrowserResult.postId) {
+                const activeReadersResult = await waitForReadersBatchIncludes(aliceSession.token, activeBrowserResult.postId, bobSession.userId, 20000);
+                const activeReadersResp = activeReadersResult.response;
+                const activePostReaders = activeReadersResult.postReaders;
+                const activeReaders = Array.isArray(activePostReaders?.readers) ? activePostReaders.readers : [];
+                recordResult(
+                    '/api/v1/readers/batch returns Bob for active-channel new post',
+                    activeReadersResult.found,
+                    activeReadersResult.found
+                        ? `count=${activePostReaders.count}, readers=${activeReaders.map((reader) => reader.username || reader.user_id).join(',')}, elapsed=${activeReadersResult.elapsed}ms`
+                        : `count=${activePostReaders?.count ?? 'missing'}, readers=${JSON.stringify(activeReaders)}, elapsed=${activeReadersResult.elapsed}ms; ` +
+                            formatHttpDetails(activeReadersResp?.status || 'n/a', activeReadersResp?.text || '<no response>'),
+                );
+            } else {
+                recordResult(
+                    '/api/v1/readers/batch returns Bob for active-channel new post',
+                    false,
+                    'post_id=missing',
+                );
+            }
+
+            recordResult(
+                'Read receipt indicator appears when Bob is already in town-square',
+                activeBrowserResult.indicator.ok,
+                activeBrowserResult.indicator.details,
+            );
         } catch (err) {
             recordResult('Server-side read receipt browser scenario', false, formatExecError(err));
         } finally {
@@ -1255,8 +1921,13 @@ const TOKEN = ${JSON.stringify(adminToken)};
 const USER_ID = ${JSON.stringify(adminSession.userId)};
 const PLUGIN_ID = ${JSON.stringify(PLUGIN_ID)};
 const SAVE_TIMEOUT_MS = ${JSON.stringify(SAVE_TIMEOUT_MS)};
-const READ_RECEIPT_MODE_ID = ${JSON.stringify(`PluginSettings.Plugins.${PLUGIN_ID.replace(/\./g, '+')}.readreceiptmode`)};
-const READ_RECEIPT_MODE_SELECTOR = 'select[id="' + READ_RECEIPT_MODE_ID + '"]';
+const SETTING_ID_PREFIX = ${JSON.stringify(`PluginSettings.Plugins.${PLUGIN_ID.replace(/\./g, '+')}.`)};
+const READ_RECEIPT_MODE_SELECTOR = 'select[id="' + SETTING_ID_PREFIX + 'readreceiptmode"]';
+const MIRROR_EMOJI_SELECTOR = 'input[id="' + SETTING_ID_PREFIX + 'mirroremojiname"]';
+const MIRROR_REACTIONS_SELECTOR = 'input[id="' + SETTING_ID_PREFIX + 'mirrorreactionsenabled"]';
+const HIDE_MIRROR_REACTIONS_SELECTOR = 'input[id="' + SETTING_ID_PREFIX + 'hidemirrorreactionsinweb"]';
+const FALLBACK_EYES_SELECTOR = 'input[id="' + SETTING_ID_PREFIX + 'fallbacktostandardeyes"]';
+const SHOW_READER_NAMES_SELECTOR = 'input[id="' + SETTING_ID_PREFIX + 'showreadernames"]';
 const SAVE_BUTTON_SELECTOR = 'button:has-text("Save"), button:has-text("Сохранить")';
 const SUCCESS_SELECTOR = '.alert-success, .banner__success, .BannerSuccess, .Toastify__toast--success, [class*="success" i]:has-text("saved"), [class*="success" i]:has-text("сохран")';
 const PENDING_SELECTOR = '.spinner, .LoadingSpinner, .icon-loading, [class*="spinner" i], [class*="loading" i], [aria-busy="true"]';
@@ -1340,6 +2011,50 @@ async function waitForSaveOutcome(page, saveButton, startTime) {
 
     const pending = await hasPendingState(page, saveButton);
     return {outcome: pending ? 'timeout_pending' : 'timeout_no_confirmation', elapsed: Date.now() - startTime};
+}
+
+async function setTextField(page, selector, value, key) {
+    const input = page.locator(selector).first();
+    const found = await input.count().catch(() => 0) > 0;
+    if (!found) {
+        console.log('RESULT:field_' + key + ':not_found');
+        return;
+    }
+
+    await input.fill(value).catch(async () => {
+        await input.evaluate((element, nextValue) => {
+            element.value = nextValue;
+        }, value);
+    });
+    await input.dispatchEvent('input', {bubbles: true});
+    await input.dispatchEvent('change', {bubbles: true});
+    console.log('RESULT:field_' + key + ':' + await input.inputValue().catch(() => 'unknown'));
+}
+
+async function setCheckboxField(page, selector, checked, key) {
+    const checkbox = page.locator(selector).first();
+    const found = await checkbox.count().catch(() => 0) > 0;
+    if (!found) {
+        console.log('RESULT:field_' + key + ':not_found');
+        return;
+    }
+
+    await checkbox.setChecked(checked).catch(async () => {
+        await checkbox.evaluate((element, nextChecked) => {
+            element.checked = nextChecked;
+        }, checked);
+    });
+    await checkbox.dispatchEvent('input', {bubbles: true});
+    await checkbox.dispatchEvent('change', {bubbles: true});
+    console.log('RESULT:field_' + key + ':' + String(await checkbox.isChecked().catch(() => 'unknown')));
+}
+
+async function setServerSideOptions(page) {
+    await setTextField(page, MIRROR_EMOJI_SELECTOR, 'eyes', 'mirrorEmojiName');
+    await setCheckboxField(page, MIRROR_REACTIONS_SELECTOR, true, 'mirrorReactionsEnabled');
+    await setCheckboxField(page, HIDE_MIRROR_REACTIONS_SELECTOR, false, 'hideMirrorReactionsInWeb');
+    await setCheckboxField(page, FALLBACK_EYES_SELECTOR, true, 'fallbackToStandardEyes');
+    await setCheckboxField(page, SHOW_READER_NAMES_SELECTOR, true, 'showReaderNames');
 }
 
 async function bypassLanding(page, label) {
@@ -1446,13 +2161,14 @@ async function run() {
         } else {
             const initialMode = await modeSelect.inputValue();
             const optionValues = await modeSelect.locator('option').evaluateAll((options) => options.map((option) => option.value));
-            const targetMode = ['hybrid_server', 'server_web_only'].find((mode) => mode !== initialMode && optionValues.includes(mode));
+            const targetMode = optionValues.includes('hybrid_server') ? 'hybrid_server' : null;
             console.log('RESULT:initial_mode:' + initialMode);
             console.log('RESULT:target_mode:' + (targetMode || 'not_found'));
 
             if (!targetMode) {
                 console.log('RESULT:save:not_clicked:target_mode_not_found');
             } else {
+                await setServerSideOptions(page);
                 await modeSelect.focus();
                 await modeSelect.selectOption(targetMode);
                 await modeSelect.dispatchEvent('input', {bubbles: true});
@@ -1507,6 +2223,18 @@ run().catch((err) => {
 `;
 
         try {
+            const guiSetupConfig = {...SERVER_SIDE_READ_RECEIPT_CONFIG, readReceiptMode: 'legacy_reactions'};
+            await patchPluginConfig(adminToken, guiSetupConfig);
+            const setupSystemResult = await waitForSystemPluginMode(adminToken, 'legacy_reactions', 10000);
+            const setupRuntimeResult = await waitForPluginRuntimeMode(adminToken, 'legacy_reactions', 10000);
+            recordResult(
+                'Prepared legacy config before System Console hybrid save',
+                Boolean(setupSystemResult.matched && setupRuntimeResult.matched),
+                `system_matched=${setupSystemResult.matched}, runtime_matched=${setupRuntimeResult.matched}, ` +
+                    `runtime=${setupRuntimeResult.config?.readReceiptMode || 'missing'}, ` +
+                    `system_keys=${JSON.stringify(getPersistedReadReceiptModeKeys(setupSystemResult.config))}`,
+            );
+
             const output = await runBrowserScript(browserScript, 120000);
             const lines = getBrowserResultLines(output);
             printBrowserResultLines(lines);
@@ -1529,6 +2257,8 @@ run().catch((err) => {
             let persistedKeysJson = '{}';
             let runtimeMode = undefined;
             let persistedConfigJson = '{}';
+            let runtimeConfigJson = '{}';
+            let runtimeServerOptionsOk = false;
             let persistedElapsed = undefined;
             let persistedError = undefined;
             try {
@@ -1539,7 +2269,13 @@ run().catch((err) => {
                 persistedMode = getEffectivePersistedReadReceiptMode(persistedResult.config);
                 persistedKeysJson = JSON.stringify(getPersistedReadReceiptModeKeys(persistedResult.config));
                 persistedConfigJson = JSON.stringify(persistedResult.config);
+                runtimeConfigJson = JSON.stringify(runtimeConfig);
                 runtimeMode = runtimeConfig.readReceiptMode;
+                runtimeServerOptionsOk = runtimeConfig.mirrorEmojiName === 'eyes' &&
+                    runtimeConfig.fallbackToStandardEyes === true &&
+                    runtimeConfig.mirrorReactionsEnabled === true &&
+                    runtimeConfig.hideMirrorReactionsInWeb === false &&
+                    runtimeConfig.showReaderNames === true;
                 persistedElapsed = persistedResult.elapsed;
                 persistedError = persistedResult.error?.message;
                 const persistedLines = [
@@ -1577,22 +2313,99 @@ run().catch((err) => {
                 ].join('; '),
             );
 
+            const guiHybridConfigReady = Boolean(
+                targetMode === 'hybrid_server' &&
+                runtimeMode === 'hybrid_server' &&
+                persistedMode === 'hybrid_server' &&
+                runtimeServerOptionsOk,
+            );
             recordResult(
-                'System Console save persists effective readReceiptMode target',
-                Boolean(targetMode && targetMode !== 'not_found' && runtimeMode === targetMode && persistedMode === targetMode),
+                'System Console save applies runtime hybrid_server config',
+                guiHybridConfigReady,
                 `target=${targetMode || 'no_result'}, persisted_effective=${persistedMode || 'no_result'}, runtime=${runtimeMode || 'no_result'}, ` +
-                    `wait=${persistedElapsed ?? 'n/a'}ms, persisted_keys=${persistedKeysJson}, ` +
+                    `runtime_server_options_ok=${runtimeServerOptionsOk}, wait=${persistedElapsed ?? 'n/a'}ms, persisted_keys=${persistedKeysJson}, ` +
                     `persisted_config=${truncate(persistedConfigJson, 300)}` +
+                    `, runtime_config=${truncate(runtimeConfigJson, 300)}` +
                     (persistedError ? `, error=${persistedError}` : ''),
             );
+
+            if (!guiHybridConfigReady) {
+                recordResult(
+                    'GUI System Console hybrid_server read receipt scenario prerequisites',
+                    false,
+                    `target=${targetMode || 'no_result'}, persisted=${persistedMode || 'no_result'}, runtime=${runtimeMode || 'no_result'}, ` +
+                        `runtime_server_options_ok=${runtimeServerOptionsOk}`,
+                );
+            } else {
+                const aliceSession = await loginViaApi(ALICE_EMAIL, ALICE_PASS);
+                const bobSession = await loginViaApi(BOB_EMAIL, BOB_PASS);
+                const team = await getTeamInfo(adminToken);
+                const channel = await getChannelInfo(adminToken, team.id, 'town-square');
+
+                const testMessage = `E2E GUI hybrid read receipt ${Date.now()}`;
+                const post = await createPost(aliceSession.token, channel.id, testMessage);
+
+                recordResult(
+                    'Alice can post a GUI-configured hybrid_server test message in town-square',
+                    post.id !== undefined,
+                    `post id: ${post.id}`,
+                );
+
+                if (post.id) {
+                    const browserResult = await runBobBrowserReadReceiptScenario({
+                        bobSession,
+                        team,
+                        testMessage,
+                        postId: post.id,
+                    });
+                    recordResult(
+                        'Bob browser opens town-square and sees GUI-configured fresh Alice post',
+                        browserResult.channel.ok,
+                        browserResult.channel.details,
+                    );
+
+                    recordResult(
+                        'Bob browser calls server POST /api/v1/read-state after GUI config',
+                        browserResult.readState.ok,
+                        browserResult.readState.details,
+                    );
+
+                    const readersResult = await waitForReadersBatchIncludes(aliceSession.token, post.id, bobSession.userId, 20000);
+                    const readersResp = readersResult.response;
+                    const postReaders = readersResult.postReaders;
+                    const readers = Array.isArray(postReaders?.readers) ? postReaders.readers : [];
+                    recordResult(
+                        '/api/v1/readers/batch returns Bob after GUI System Console save',
+                        readersResult.found,
+                        readersResult.found
+                            ? `count=${postReaders.count}, readers=${readers.map((reader) => reader.username || reader.user_id).join(',')}, elapsed=${readersResult.elapsed}ms`
+                            : `count=${postReaders?.count ?? 'missing'}, readers=${JSON.stringify(readers)}, elapsed=${readersResult.elapsed}ms; ` +
+                                formatHttpDetails(readersResp?.status || 'n/a', readersResp?.text || '<no response>'),
+                    );
+
+                    recordResult(
+                        'DOM .who-read-readers appears on GUI-configured fresh Alice post',
+                        browserResult.indicator.ok,
+                        browserResult.indicator.details,
+                    );
+                }
+            }
         } catch (err) {
             recordResult('System Console browser test', false, formatExecError(err));
         } finally {
             try {
                 const restoreResult = await restoreReadReceiptConfig(adminToken, initialSystemPluginConfig, initialReadReceiptMode);
-                console.log('RESULT:restored_config:' + restoreResult.targetMode);
+                const runtimeMode = restoreResult.runtimeResult.config?.readReceiptMode;
+                const systemMode = getEffectivePersistedReadReceiptMode(restoreResult.systemResult.config);
+                recordResult(
+                    'Restored initial read receipt config after System Console test',
+                    Boolean(runtimeMode === restoreResult.targetMode && systemMode === restoreResult.targetMode),
+                    `runtime=${runtimeMode || 'missing'}, system=${systemMode || 'missing'}, ` +
+                        `target=${restoreResult.targetMode}, ` +
+                        `runtime_wait=${restoreResult.runtimeResult.elapsed}ms, system_wait=${restoreResult.systemResult.elapsed}ms`,
+                );
             } catch (err) {
-                console.log('RESULT:restore_config_error:' + truncate(err.message, 200));
+                recordResult('Restored initial read receipt config after System Console test', false, err.message);
             }
         }
     }

@@ -14,8 +14,10 @@ type PendingReaderRequest = {
     reject: (reason?: unknown) => void;
 };
 
+const CACHE_TTL_MS = 30_000; // 30 seconds
+
 const service = new ServerReadReceiptService();
-const cache = new Map<string, CachedPostReaders>();
+const cache = new Map<string, {data: CachedPostReaders; expiresAt: number}>();
 const pendingRequests = new Map<string, PendingReaderRequest[]>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -34,8 +36,13 @@ export function fetchReadReceiptReaders(postId: string): Promise<CachedPostReade
     }
 
     const cached = cache.get(postId);
+    if (cached && cached.expiresAt > Date.now()) {
+        return Promise.resolve(cached.data);
+    }
+
+    // Cache miss or expired — remove stale entry
     if (cached) {
-        return Promise.resolve(cached);
+        cache.delete(postId);
     }
 
     return new Promise((resolve, reject) => {
@@ -57,14 +64,15 @@ async function flushPendingReaders(): Promise<void> {
 
     try {
         const response = await service.fetchReaders(postIds);
+        const expiresAt = Date.now() + CACHE_TTL_MS;
         for (const postId of postIds) {
             const postReaders = response.posts?.[postId];
-            const value = {
+            const data = {
                 count: postReaders?.count || 0,
                 readers: postReaders?.readers || [],
             };
-            cache.set(postId, value);
-            resolveRequests(requests.get(postId), value);
+            cache.set(postId, {data, expiresAt});
+            resolveRequests(requests.get(postId), data);
         }
     } catch (err) {
         for (const postId of postIds) {

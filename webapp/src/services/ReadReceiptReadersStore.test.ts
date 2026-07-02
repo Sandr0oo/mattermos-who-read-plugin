@@ -1,6 +1,6 @@
 /* eslint-disable max-nested-callbacks */
 
-import {SERVER_READ_RECEIPT_API_PREFIX} from './ServerReadReceiptService';
+import ServerReadReceiptService, {SERVER_READ_RECEIPT_API_PREFIX} from './ServerReadReceiptService';
 import {clearReadReceiptReadersCache, fetchReadReceiptReaders} from './ReadReceiptReadersStore';
 
 const postAID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -73,5 +73,38 @@ describe('ReadReceiptReadersStore', () => {
 
         expect(readers).toEqual({count: 0, readers: []});
         expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('expires cached readers after TTL', async () => {
+        const testPostId = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
+        jest.useFakeTimers();
+
+        const fetchReadersSpy = jest.spyOn(ServerReadReceiptService.prototype, 'fetchReaders').mockResolvedValue({
+            posts: {[testPostId]: {post_id: testPostId, count: 2, readers: []}},
+            max_readers_per_post: 50,
+        });
+
+        // First call — triggers setTimeout(flushPendingReaders, 0)
+        const first = fetchReadReceiptReaders(testPostId);
+        jest.advanceTimersByTime(0); // fire the flush timer
+        await first;
+        expect(fetchReadersSpy).toHaveBeenCalledTimes(1);
+
+        // Second call within TTL — should use cache
+        await fetchReadReceiptReaders(testPostId);
+        expect(fetchReadersSpy).toHaveBeenCalledTimes(1);
+
+        // Advance past TTL
+        jest.advanceTimersByTime(31000);
+
+        // Third call after TTL — should make a new API call
+        const third = fetchReadReceiptReaders(testPostId);
+        jest.advanceTimersByTime(0); // fire the flush timer
+        await third;
+        expect(fetchReadersSpy).toHaveBeenCalledTimes(2);
+
+        fetchReadersSpy.mockRestore();
+        clearReadReceiptReadersCache();
+        jest.useRealTimers();
     });
 });

@@ -156,6 +156,13 @@ describe('Plugin read reaction behavior', () => {
         getCurrentUserMock.mockReturnValue({id: 'me'});
         getLastPostPerChannelMock.mockReturnValue({});
         mockServerConfig();
+
+        // Simulate focused window — document.hasFocus() returns false in jsdom
+        jest.spyOn(document, 'hasFocus').mockReturnValue(true);
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
     });
 
     describe('lifecycle', () => {
@@ -177,7 +184,7 @@ describe('Plugin read reaction behavior', () => {
             expect(handlers.thread_read_changed).toBeUndefined();
         });
 
-        it('registers and unregisters the mirror reaction hider and footer in hybrid mode', async () => {
+        it('registers and unregisters the mirror reaction hider, footer and DOM fallback in hybrid mode', async () => {
             mockServerConfig({
                 hideMirrorReactionsInWeb: true,
                 mirrorReactionsEnabled: true,
@@ -189,12 +196,13 @@ describe('Plugin read reaction behavior', () => {
 
             await plugin.initialize(registry, store);
 
-            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(2);
             expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
 
             plugin.uninitialize();
 
             expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id');
+            expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id-2');
             expect(registry.unregisterComponent).toHaveBeenCalledWith('post-footer-component-id');
         });
 
@@ -303,7 +311,7 @@ describe('Plugin read reaction behavior', () => {
             });
             expect(addReactionMock).not.toHaveBeenCalled();
             expect(removeReactionMock).not.toHaveBeenCalled();
-            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(2);
             expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
             expect(Storage.getLastPostId('channelA')).toBe('last-post-id');
             expect(Storage.getLastViewed('channelA')).toBe(123);
@@ -331,7 +339,7 @@ describe('Plugin read reaction behavior', () => {
             });
             expect(removeReactionMock).not.toHaveBeenCalled();
             expect(addReactionMock).not.toHaveBeenCalled();
-            expect(registry.registerRootComponent).not.toHaveBeenCalled();
+            expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
             expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
             expect(Storage.getLastPostId('channelA')).toBe('own-post-id');
             expect(Storage.getLastViewed('channelA')).toBe(123);
@@ -499,6 +507,89 @@ describe('Plugin read reaction behavior', () => {
             errorSpy.mockRestore();
         });
 
+        it('defers channel processing when the window is inactive and processes on focus', async () => {
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            const lastPost = createPost({id: 'last-post-id', user_id: 'other'});
+            getLastPostPerChannelMock.mockReturnValue({channelA: lastPost});
+
+            const plugin = new Plugin();
+            await plugin.initialize(registry, store);
+
+            // Make window inactive
+            window.dispatchEvent(new Event('blur'));
+
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            // Should NOT have marked read state (deferred)
+            expect(addReactionMock).not.toHaveBeenCalled();
+
+            // Focus the window — should process deferred channel
+            window.dispatchEvent(new Event('focus'));
+            await flushPromises();
+
+            expect(addReactionMock).toHaveBeenCalledWith('last-post-id', 'eyes');
+
+            plugin.uninitialize();
+        });
+
+        it('processes own post immediately even when window is inactive', async () => {
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            const lastPost = createPost({id: 'own-post-id', user_id: 'me'});
+            getLastPostPerChannelMock.mockReturnValue({channelA: lastPost});
+
+            const plugin = new Plugin();
+            await plugin.initialize(registry, store);
+
+            // Make window inactive
+            window.dispatchEvent(new Event('blur'));
+
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            // Own post should still be processed (not deferred)
+            // In legacy mode, own post removes old reaction but doesn't add new one
+            expect(Storage.getLastPostId('channelA')).toBe('own-post-id');
+
+            plugin.uninitialize();
+        });
+
+        it('defers server-mode channel processing when window is inactive', async () => {
+            const fetchMock = mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
+            const {handlers, registry} = createRegistry();
+            const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+            const {store} = createStore({}, dispatch);
+            const lastPost = createPost({id: 'last-post-id', user_id: 'other'});
+            getLastPostPerChannelMock.mockReturnValue({channelA: lastPost});
+
+            const plugin = new Plugin();
+            await plugin.initialize(registry, store);
+
+            // Make window inactive
+            window.dispatchEvent(new Event('blur'));
+
+            await handlers.multiple_channels_viewed({data: {channel_times: {channelA: 123}}});
+
+            // Should NOT have called read-state API (deferred)
+            const readStateCall = fetchMock.mock.calls.find(([url]) => url === `${SERVER_READ_RECEIPT_API_PREFIX}/read-state`);
+            expect(readStateCall).toBeUndefined();
+
+            // Focus the window — should process deferred channel
+            window.dispatchEvent(new Event('focus'));
+            await flushPromises();
+
+            // Now read-state should have been called
+            expectReadStateRequest(fetchMock, {
+                channel_id: 'channelA',
+                last_read_post_id: 'last-post-id',
+                scope_type: 'channel',
+            });
+
+            plugin.uninitialize();
+        });
+
         it('keeps the old stored post when old reaction removal fails', async () => {
             const errorSpy = jest.spyOn(Logger, 'error').mockImplementation(jest.fn());
             const {handlers, registry} = createRegistry();
@@ -582,6 +673,9 @@ describe('Plugin read reaction behavior', () => {
             const plugin = new Plugin();
 
             await plugin.initialize(registry, store);
+
+            // Window starts active due to document.hasFocus() mock — blur to test deferral
+            window.dispatchEvent(new Event('blur'));
             await handlers.thread_read_changed({data: {thread_id: 'thread-id'}});
 
             expect(addReactionMock).not.toHaveBeenCalled();

@@ -58,22 +58,54 @@ export default class Plugin {
     private readReceiptIndicatorComponentId: string | null = null;
     private serverWebSocketHandlersRegistered = false;
     private operationQueues = new Map<string, Promise<void>>();
+    private store: Store<GlobalState, Action<Record<string, unknown>>> | null = null;
 
     // Ссылки на обработчики для cleanup в uninitialize
     private focusHandler = async (): Promise<void> => {
         Logger.log('window focus');
-        this.readState.setWindowIsActive(true);
-        const threadId = this.readState.getCurrentThreadId();
-        if (threadId && !this.readState.isProcessing()) {
-            await this.processThread(threadId);
-            this.readState.setCurrentThreadId(null);
-        }
+        await this.onWindowActive();
     };
 
     private blurHandler = (): void => {
         Logger.log('window blur');
         this.readState.setWindowIsActive(false);
     };
+
+    private visibilityChangeHandler = async (): Promise<void> => {
+        if (document.hidden) {
+            Logger.log('document hidden');
+            this.readState.setWindowIsActive(false);
+            return;
+        }
+        Logger.log('document visible');
+        await this.onWindowActive();
+    };
+
+    private async onWindowActive(): Promise<void> {
+        this.readState.setWindowIsActive(true);
+
+        // Process deferred thread (existing logic from focusHandler)
+        const threadId = this.readState.getCurrentThreadId();
+        if (threadId && !this.readState.isProcessing()) {
+            await this.processThread(threadId);
+            this.readState.setCurrentThreadId(null);
+        }
+
+        // Process deferred channels
+        const deferredChannels = this.readState.getDeferredChannelsAndClear();
+        if (deferredChannels.length > 0 && this.store) {
+            const lastPostsInChannel = getLastPostPerChannel(this.store.getState());
+            for (const {channelId, viewedAt} of deferredChannels) {
+                if (!this.readState.isWindowActive()) {
+                    break;
+                }
+                // eslint-disable-next-line no-await-in-loop
+                await this.enqueueOperation(`channel:${channelId}`, async () => {
+                    await this.processViewedChannel(channelId, lastPostsInChannel[channelId], viewedAt);
+                });
+            }
+        }
+    }
 
     private readReceiptUpdatedHandler = (event: ReadReceiptUpdatedWebSocketEvent): void => {
         dispatchReadReceiptUpdated(event.data || {});
@@ -86,16 +118,10 @@ export default class Plugin {
     public async initialize(registry: PluginRegistry, store: Store<GlobalState, Action<Record<string, unknown>>>) {
         Logger.log('initialize start');
         this.registry = registry;
+        this.store = store;
         this.applyReadReceiptConfig(await this.fetchInitialReadReceiptConfig());
-        const me = getCurrentUser(store.getState());
-        Logger.log('current user from store', me?.id);
-        if (!me?.id) {
-            Logger.error('Failed to get current user from store');
-            return;
-        }
-        this.me = me;
-        Logger.log('current user id', this.me.id);
 
+        // Register components and handlers first — they don't depend on this.me.
         this.postService = new PostService(store);
         if (this.readReceiptConfig.isLegacyMode) {
             this.reactionService = new ReactionService(store, this.readState, this.emoji);
@@ -105,6 +131,10 @@ export default class Plugin {
 
         window.addEventListener('focus', this.focusHandler);
         window.addEventListener('blur', this.blurHandler);
+        document.addEventListener('visibilitychange', this.visibilityChangeHandler);
+
+        // Set initial window state — the window is typically active when the plugin loads.
+        this.readState.setWindowIsActive(typeof document !== 'undefined' && document.hasFocus());
 
         registry.registerWebSocketEventHandler<MultipleChannelsViewedEvent>('multiple_channels_viewed', async (event) => {
             Logger.log('multiple_channels_viewed raw event', event);
@@ -169,7 +199,29 @@ export default class Plugin {
             this.serverWebSocketHandlersRegistered = true;
         }
 
+        // Try to get current user — may not be available yet (e.g. before login completes).
+        if (!this.ensureCurrentUser()) {
+            Logger.log('current user not yet available in store, will retry on events');
+        }
+
         Logger.log('initialize done');
+    }
+
+    private ensureCurrentUser(): boolean {
+        if (this.me?.id) {
+            return true;
+        }
+        if (!this.store) {
+            return false;
+        }
+        const me = getCurrentUser(this.store.getState());
+        if (me?.id) {
+            this.me = me;
+            Logger.log('current user id (lazy)', this.me.id);
+            return true;
+        }
+        Logger.log('current user not yet available in store');
+        return false;
     }
 
     private async fetchInitialReadReceiptConfig(): Promise<ReadReceiptConfig> {
@@ -213,9 +265,9 @@ export default class Plugin {
         if (this.readReceiptConfig.isServerMode) {
             if (canRegisterPostFooterComponent(registry)) {
                 this.readReceiptIndicatorComponentId = registry.registerPostFooterComponent(ReadReceiptIndicator);
-            } else {
-                this.readReceiptDomFallbackComponentId = registry.registerRootComponent(ReadReceiptDomFallback);
             }
+
+            this.readReceiptDomFallbackComponentId = registry.registerRootComponent(ReadReceiptDomFallback);
         }
     }
 
@@ -223,6 +275,7 @@ export default class Plugin {
         Logger.log('uninitialize');
         window.removeEventListener('focus', this.focusHandler);
         window.removeEventListener('blur', this.blurHandler);
+        document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
         this.registry?.unregisterWebSocketEventHandler('multiple_channels_viewed');
         this.registry?.unregisterWebSocketEventHandler('thread_read_changed');
         if (this.serverWebSocketHandlersRegistered) {
@@ -243,6 +296,7 @@ export default class Plugin {
             this.readReceiptDomFallbackComponentId = null;
         }
         this.registry = null;
+        this.store = null;
         this.reactionService = null;
         this.operationQueues.clear();
         this.readState.clear();
@@ -273,8 +327,24 @@ export default class Plugin {
             return;
         }
 
+        if (!this.readState.isWindowActive()) {
+            // Own posts proceed even when inactive (consistent with thread processing).
+            if (this.ensureCurrentUser() && lastPost.user_id === this.me.id) {
+                Logger.log('window inactive but last post is own, proceeding');
+            } else {
+                this.readState.addDeferredChannel(channelId, viewedAt);
+                Logger.log('window inactive, deferred channel', channelId);
+                return;
+            }
+        }
+
         if (this.readReceiptConfig.isServerMode) {
             await this.processServerViewedChannel(channelId, lastPost, viewedAt);
+            return;
+        }
+
+        if (!this.ensureCurrentUser()) {
+            Logger.log('user not available, skipping legacy channel processing');
             return;
         }
 
@@ -417,6 +487,11 @@ export default class Plugin {
             return;
         }
 
+        if (!this.ensureCurrentUser()) {
+            Logger.log('user not available, skipping thread processing');
+            return;
+        }
+
         const isLastPostByMe = lastPost.user_id === this.me.id;
         Logger.log('isLastPostByMe', isLastPostByMe, 'windowActive', this.readState.isWindowActive());
 
@@ -496,6 +571,9 @@ export default class Plugin {
     }
 
     private hasOwnReadReaction(post: Post): boolean {
+        if (!this.me?.id) {
+            return false;
+        }
         if (!post.metadata?.reactions) {
             return false;
         }

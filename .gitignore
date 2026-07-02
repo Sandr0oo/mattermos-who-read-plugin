@@ -16,3 +16,6 @@ server/manifest.go
 .dolt/
 *.db
 .beads-credential-key
+
+# Playwright MCP browser test artifacts
+.playwright-mcp/

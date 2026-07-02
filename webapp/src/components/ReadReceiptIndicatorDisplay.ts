@@ -4,8 +4,13 @@ export const READ_RECEIPT_INDICATOR_CLASS = 'who-read-readers';
 
 export const READ_RECEIPT_INDICATOR_STYLE = {
     color: 'var(--center-channel-color-56)',
+    cursor: 'default',
+    display: 'inline-block',
     fontSize: '12px',
-    marginLeft: '8px',
+    marginLeft: '6px',
+    userSelect: 'none',
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
 };
 
 export function buildReadReceiptTitle(count: number, readers: ReaderInfo[]): string {
