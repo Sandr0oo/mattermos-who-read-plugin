@@ -29,6 +29,11 @@ jobs:
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
+      - name: Configure git for HTTPS fallback
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          git config --global url."https://github.com/".insteadOf git@github.com:
+
       - name: Build plugin
         run: make dist
 
