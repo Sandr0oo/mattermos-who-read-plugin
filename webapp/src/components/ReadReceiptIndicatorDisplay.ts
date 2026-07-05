@@ -3,13 +3,10 @@ import {ReaderInfo} from '../services/ServerReadReceiptService';
 export const READ_RECEIPT_INDICATOR_CLASS = 'who-read-readers';
 
 export const READ_RECEIPT_INDICATOR_STYLE = {
-    color: 'var(--center-channel-color-56)',
+    color: 'var(--center-channel-color-72)',
     cursor: 'default',
-    display: 'inline-block',
     fontSize: '12px',
-    marginLeft: '6px',
     userSelect: 'none',
-    verticalAlign: 'middle',
     whiteSpace: 'nowrap',
 };
 

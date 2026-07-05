@@ -3,6 +3,7 @@
 
 import {addReaction, getPostThread, removeReaction} from 'mattermost-redux/actions/posts';
 import {getLastPostPerChannel} from 'mattermost-redux/selectors/entities/posts';
+import {getCurrentChannelId} from 'mattermost-redux/selectors/entities/channels';
 import {getCurrentUser} from 'mattermost-redux/selectors/entities/users';
 
 import {createPost, createRegistry, createStore, flushPromises} from '../tests/helpers';
@@ -35,11 +36,16 @@ jest.mock('mattermost-redux/selectors/entities/posts', () => ({
     getLastPostPerChannel: jest.fn(),
 }));
 
+jest.mock('mattermost-redux/selectors/entities/channels', () => ({
+    getCurrentChannelId: jest.fn(),
+}));
+
 jest.mock('mattermost-redux/selectors/entities/users', () => ({
     getCurrentUser: jest.fn(),
 }));
 
 const addReactionMock = addReaction as jest.Mock;
+const getCurrentChannelIdMock = getCurrentChannelId as jest.Mock;
 const getCurrentUserMock = getCurrentUser as jest.Mock;
 const getLastPostPerChannelMock = getLastPostPerChannel as jest.Mock;
 const getPostThreadMock = getPostThread as jest.Mock;
@@ -184,7 +190,7 @@ describe('Plugin read reaction behavior', () => {
             expect(handlers.thread_read_changed).toBeUndefined();
         });
 
-        it('registers and unregisters the mirror reaction hider, footer and DOM fallback in hybrid mode', async () => {
+        it('registers and unregisters the mirror reaction hider and DOM fallback in hybrid mode', async () => {
             mockServerConfig({
                 hideMirrorReactionsInWeb: true,
                 mirrorReactionsEnabled: true,
@@ -197,13 +203,11 @@ describe('Plugin read reaction behavior', () => {
             await plugin.initialize(registry, store);
 
             expect(registry.registerRootComponent).toHaveBeenCalledTimes(2);
-            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
 
             plugin.uninitialize();
 
             expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id');
             expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id-2');
-            expect(registry.unregisterComponent).toHaveBeenCalledWith('post-footer-component-id');
         });
 
         it('uses effective fallback emoji for the mirror reaction hider', async () => {
@@ -254,10 +258,9 @@ describe('Plugin read reaction behavior', () => {
             window.removeEventListener(READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT, configChangedListener);
         });
 
-        it('registers DOM fallback root component when post footer registration is unavailable', async () => {
+        it('registers DOM fallback root component in server mode', async () => {
             mockServerConfig({readReceiptMode: ReadReceiptMode.ServerWebOnly});
             const {registry} = createRegistry();
-            delete (registry as any).registerPostFooterComponent;
             const {store} = createStore();
             const plugin = new Plugin();
 
@@ -269,6 +272,74 @@ describe('Plugin read reaction behavior', () => {
             plugin.uninitialize();
 
             expect(registry.unregisterComponent).toHaveBeenCalledWith('root-component-id');
+        });
+
+        it('syncs current channel read state on network restore', async () => {
+            const originalSetTimeout = global.setTimeout;
+            global.setTimeout = ((fn: (...args: any[]) => void, ...args: any[]) => {
+                fn();
+                return 0;
+            }) as any;
+            try {
+                const {registry} = createRegistry();
+                const dispatch = jest.fn(() => Promise.resolve({data: {}}));
+                const {store} = createStore({}, dispatch);
+                const lastPost = createPost({id: 'last-online-post-id', user_id: 'other'});
+                getCurrentChannelIdMock.mockReturnValue('channelA');
+                getLastPostPerChannelMock.mockReturnValue({channelA: lastPost});
+
+                const plugin = new Plugin();
+                await plugin.initialize(registry, store);
+
+                window.dispatchEvent(new Event('online'));
+
+                // Allow async chain to complete
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+
+                expect(addReactionMock).toHaveBeenCalledWith('last-online-post-id', 'eyes');
+
+                plugin.uninitialize();
+            } finally {
+                global.setTimeout = originalSetTimeout;
+            }
+        });
+
+        it('cleans up online/offline listeners on uninitialize', async () => {
+            const originalSetTimeout = global.setTimeout;
+            global.setTimeout = ((fn: (...args: any[]) => void, ...args: any[]) => {
+                fn();
+                return 0;
+            }) as any;
+            try {
+                const {registry} = createRegistry();
+                const {store} = createStore();
+                const plugin = new Plugin();
+
+                await plugin.initialize(registry, store);
+
+                // Handler is active — online event triggers re-sync
+                // After uninitialize, handlers should be removed
+                plugin.uninitialize();
+
+                getCurrentChannelIdMock.mockReturnValue('channelA');
+                getLastPostPerChannelMock.mockReturnValue({channelA: createPost({id: 'post-after-cleanup', user_id: 'other'})});
+
+                window.dispatchEvent(new Event('online'));
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+                await flushPromises();
+
+                // Listener was removed, so no reaction should be added
+                expect(addReactionMock).not.toHaveBeenCalled();
+            } finally {
+                global.setTimeout = originalSetTimeout;
+            }
         });
     });
 
@@ -312,7 +383,6 @@ describe('Plugin read reaction behavior', () => {
             expect(addReactionMock).not.toHaveBeenCalled();
             expect(removeReactionMock).not.toHaveBeenCalled();
             expect(registry.registerRootComponent).toHaveBeenCalledTimes(2);
-            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
             expect(Storage.getLastPostId('channelA')).toBe('last-post-id');
             expect(Storage.getLastViewed('channelA')).toBe(123);
 
@@ -340,7 +410,6 @@ describe('Plugin read reaction behavior', () => {
             expect(removeReactionMock).not.toHaveBeenCalled();
             expect(addReactionMock).not.toHaveBeenCalled();
             expect(registry.registerRootComponent).toHaveBeenCalledTimes(1);
-            expect(registry.registerPostFooterComponent).toHaveBeenCalledTimes(1);
             expect(Storage.getLastPostId('channelA')).toBe('own-post-id');
             expect(Storage.getLastViewed('channelA')).toBe(123);
         });

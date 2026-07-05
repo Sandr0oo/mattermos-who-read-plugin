@@ -19,6 +19,7 @@ const POST_SELECTOR = '.post[data-testid="postView"][id^="post_"], .post[data-te
 const FALLBACK_INDICATOR_ATTRIBUTE = 'data-who-read-fallback-indicator';
 const POST_ID_ATTRIBUTE = 'data-who-read-post-id';
 const FALLBACK_INDICATOR_SELECTOR = `span.${READ_RECEIPT_INDICATOR_CLASS}[${FALLBACK_INDICATOR_ATTRIBUTE}="true"]`;
+const INJECTED_STYLE_ID = 'who-read-readers-style';
 
 let scanTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -26,12 +27,41 @@ const noopCleanup = (): void => {
     // Nothing to clean up when document.body is unavailable.
 };
 
+function injectReadReceiptStyle(): void {
+    if (!document.head || document.getElementById(INJECTED_STYLE_ID)) {
+        return;
+    }
+    const style = document.createElement('style');
+    style.id = INJECTED_STYLE_ID;
+    style.textContent = `
+        .post__header .who-read-readers {
+            display: inline-block;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+        .post__body .who-read-readers {
+            display: block;
+            margin-left: 0;
+            margin-top: 2px;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function removeReadReceiptStyle(): void {
+    const style = document.getElementById(INJECTED_STYLE_ID);
+    if (style) {
+        style.remove();
+    }
+}
+
 export default function ReadReceiptDomFallback(): React.ReactElement | null {
     useEffect(() => {
         if (!document.body) {
             return noopCleanup;
         }
 
+        injectReadReceiptStyle();
         scheduleReadReceiptDomFallbackScan();
 
         const observer = new MutationObserver(() => {
@@ -64,6 +94,7 @@ export default function ReadReceiptDomFallback(): React.ReactElement | null {
             window.removeEventListener(READ_RECEIPT_CONFIG_CHANGED_BROWSER_EVENT, handleConfigChanged);
             clearScheduledReadReceiptDomFallbackScan();
             removeReadReceiptDomFallbackIndicators();
+            removeReadReceiptStyle();
         };
     }, []);
 
@@ -199,11 +230,55 @@ function hasVisibleNonFallbackIndicator(postElement: Element): boolean {
 }
 
 function findIndicatorTarget(postElement: Element, postId: string): HTMLElement | null {
-    const messageElement = document.getElementById(`${postId}_message`);
-    if (messageElement && postElement.contains(messageElement)) {
-        const body = messageElement.closest('.post__body');
+    // Grouped posts (same--user) have a 0-height header even when permalink is shown on hover.
+    // Always place the indicator in .post__body for these posts to avoid overlap.
+    if (postElement.classList.contains('same--user')) {
+        const body = postElement.querySelector('.post__body');
         if (body instanceof HTMLElement) {
             return body;
+        }
+    }
+
+    // Prefer the permalink's parent (.col.d-flex.align-items-center) so the indicator
+    // lands next to the timestamp rather than at the far right of .post__header.
+    const permalink = postElement.querySelector('.post__permalink');
+    if (permalink?.parentElement instanceof HTMLElement) {
+        return permalink.parentElement;
+    }
+
+    const time = postElement.querySelector('.post__time');
+    if (time?.parentElement instanceof HTMLElement) {
+        return time.parentElement;
+    }
+
+    // No permalink and no time — this is a grouped post (collapsed header).
+    // Inject into .post__body instead (between message text and reactions).
+    const body = postElement.querySelector('.post__body');
+    if (body instanceof HTMLElement) {
+        return body;
+    }
+
+    // Try .post__header directly within the post element
+    const header = postElement.querySelector('.post__header');
+    if (header instanceof HTMLElement) {
+        return header;
+    }
+
+    // Fallback: find .post__content then .post__header within it
+    const content = postElement.querySelector('.post__content');
+    if (content instanceof HTMLElement) {
+        const headerInContent = content.querySelector('.post__header');
+        if (headerInContent instanceof HTMLElement) {
+            return headerInContent;
+        }
+    }
+
+    // Last resort: keep existing fallback to .post__body
+    const messageElement = document.getElementById(`${postId}_message`);
+    if (messageElement && postElement.contains(messageElement)) {
+        const messageBody = messageElement.closest('.post__body');
+        if (messageBody instanceof HTMLElement) {
+            return messageBody;
         }
 
         if (messageElement.parentElement) {
@@ -220,29 +295,36 @@ function findIndicatorTarget(postElement: Element, postId: string): HTMLElement 
 }
 
 function insertIndicatorIntoTarget(target: HTMLElement, indicator: HTMLSpanElement): void {
-    // In Mattermost 9.11, the reactions container is .post__body-reactions-acks (a flex row).
-    // Always place the indicator inside this container to avoid empty-space issues.
-    const reactionsAcks = target.querySelector('.post__body-reactions-acks');
-    const reactionList = target.querySelector('.post-reaction-list, .reaction-list');
+    // When target is .post__body (grouped posts), insert after the message text
+    // so the indicator appears between the message and reactions.
+    if (target.classList.contains('post__body')) {
+        const autoHeight = target.querySelector('.AutoHeight');
+        if (autoHeight) {
+            target.insertBefore(indicator, autoHeight.nextSibling);
+            return;
+        }
+        const postMessage = target.querySelector('.post-message');
+        if (postMessage) {
+            target.insertBefore(indicator, postMessage.nextSibling);
+            return;
+        }
+    }
 
-    // Preferred: insert after the reaction list, inside the reactions container.
-    if (reactionsAcks && reactionList && reactionList.parentElement === reactionsAcks) {
-        reactionsAcks.insertBefore(indicator, reactionList.nextSibling);
+    // The target is the permalink's parent (.col.d-flex.align-items-center).
+    // Insert the indicator right after the permalink within this parent.
+    const permalink = target.querySelector('.post__permalink');
+    if (permalink) {
+        target.insertBefore(indicator, permalink.nextSibling);
         return;
     }
 
-    // No reaction list — insert as first child of the reactions container.
-    if (reactionsAcks instanceof HTMLElement) {
-        reactionsAcks.insertBefore(indicator, reactionsAcks.firstChild);
+    const time = target.querySelector('.post__time');
+    if (time) {
+        target.insertBefore(indicator, time.nextSibling);
         return;
     }
 
-    // Legacy DOM fallback: try .reaction-list, then append to target.
-    if (reactionList?.parentElement) {
-        reactionList.parentElement.insertBefore(indicator, reactionList.nextSibling);
-        return;
-    }
-
+    // Fallback: append to target if no target-specific anchor found.
     target.appendChild(indicator);
 }
 

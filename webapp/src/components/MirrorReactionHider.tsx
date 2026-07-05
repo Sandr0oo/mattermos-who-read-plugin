@@ -49,6 +49,24 @@ function hideMirrorReactionNodes(emojiName: string): void {
         const container = node.closest(REACTION_CONTAINER_SELECTOR) || node;
         container.setAttribute(MIRROR_REACTION_HIDDEN_ATTRIBUTE, 'true');
     });
+
+    // Hide reaction-acks containers that have no visible reactions left.
+    // This prevents empty space and hover overlap when all reactions are hidden mirror reactions.
+    document.querySelectorAll('.post__body-reactions-acks').forEach((container) => {
+        const allReactions = Array.from(container.querySelectorAll(REACTION_CONTAINER_SELECTOR)).filter(
+            (el) => !el.closest('.post-add-reaction'),
+        );
+
+        const visibleReactions = allReactions.filter((el) => (
+            !el.hasAttribute(MIRROR_REACTION_HIDDEN_ATTRIBUTE)
+        ));
+
+        if (allReactions.length > 0 && visibleReactions.length === 0) {
+            container.setAttribute(MIRROR_REACTION_HIDDEN_ATTRIBUTE, 'true');
+        } else {
+            container.removeAttribute(MIRROR_REACTION_HIDDEN_ATTRIBUTE);
+        }
+    });
 }
 
 function restoreMirrorReactionNodes(): void {

@@ -41,6 +41,10 @@ describe('ReadReceiptDomFallback', () => {
         document.body.innerHTML = `
             <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
+                    <div class="post__header">
+                        <button>admin</button>
+                        <a class="post__permalink"><time class="post__time">4:15 PM</time></a>
+                    </div>
                     <div class="post__body">
                         <div id="${postAID}_message">message A</div>
                     </div>
@@ -53,6 +57,10 @@ describe('ReadReceiptDomFallback', () => {
             </div>
             <div class="post" data-testid="postView" id="post_${postBID}">
                 <div class="post__content">
+                    <div class="post__header">
+                        <button>admin</button>
+                        <a class="post__permalink"><time class="post__time">4:15 PM</time></a>
+                    </div>
                     <span class="who-read-readers" data-who-read-fallback-indicator="true" data-who-read-post-id="${postBID}">✓ 1</span>
                     <div id="${postBID}_message">message B</div>
                 </div>
@@ -73,14 +81,16 @@ describe('ReadReceiptDomFallback', () => {
         expect(fetchReadReceiptReadersMock).not.toHaveBeenCalledWith('invalid_id');
     });
 
-    it('inserts fallback indicator right after .reaction-list when present', async () => {
+    it('inserts fallback indicator after .post__permalink in post header', async () => {
         document.body.innerHTML = `
             <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
+                    <div class="post__header">
+                        <button>admin</button>
+                        <a class="post__permalink"><time class="post__time">4:15 PM</time></a>
+                    </div>
                     <div class="post__body">
                         <div id="${postAID}_message">message A</div>
-                        <div class="reaction-list"><span>eyes</span></div>
-                        <button class="add-reaction">Add Reaction</button>
                     </div>
                 </div>
             </div>
@@ -94,24 +104,53 @@ describe('ReadReceiptDomFallback', () => {
         expect(indicator).toBeTruthy();
         expect(indicator.textContent).toBe('✓ 2');
 
-        const reactionList = postA.querySelector('.reaction-list');
-        expect(indicator.previousElementSibling).toBe(reactionList);
-        expect(indicator.nextElementSibling?.classList.contains('add-reaction')).toBe(true);
+        const permalink = postA.querySelector('.post__permalink');
+        expect(indicator.parentElement).toBe(postA.querySelector('.post__header'));
+        expect(indicator.previousElementSibling).toBe(permalink);
     });
 
-    it('inserts fallback indicator after .post-reaction-list in Mattermost 9.11 DOM', async () => {
+    it('inserts fallback indicator after .post__time when no .post__permalink exists', async () => {
         document.body.innerHTML = `
             <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
+                    <div class="post__header">
+                        <button>admin</button>
+                        <time class="post__time">4:15 PM</time>
+                    </div>
+                    <div class="post__body">
+                        <div id="${postAID}_message">message A</div>
+                    </div>
+                </div>
+            </div>
+        `;
+        fetchReadReceiptReadersMock.mockImplementation(readReadersForTest);
+
+        await scanReadReceiptDomFallback();
+
+        const postA = document.getElementById(`post_${postAID}`) as HTMLElement;
+        const indicator = postA.querySelector('.who-read-readers[data-who-read-fallback-indicator="true"]') as HTMLElement;
+        expect(indicator).toBeTruthy();
+        expect(indicator.textContent).toBe('✓ 2');
+
+        const time = postA.querySelector('.post__time');
+        expect(indicator.parentElement).toBe(postA.querySelector('.post__header'));
+        expect(indicator.previousElementSibling).toBe(time);
+    });
+
+    it('inserts fallback indicator after .AutoHeight for grouped posts with collapsed header', async () => {
+        document.body.innerHTML = `
+            <div class="post same--user" data-testid="postView" id="post_${postAID}">
+                <div class="post__content">
+                    <div class="post__header">
+                        <div class="col col__name">admin</div>
+                        <div class="col d-flex align-items-center"></div>
+                        <div class="col post-menu">button</div>
+                    </div>
                     <div class="post__body">
                         <div class="AutoHeight">
-                            <div id="${postAID}_message">message A</div>
-                        </div>
-                        <div class="post__body-reactions-acks">
-                            <div class="post-reaction-list">
-                                <div class="Reaction">eyes</div>
+                            <div class="post-message">
+                                <div id="${postAID}_message">message A</div>
                             </div>
-                            <button class="post-add-reaction">Add Reaction</button>
                         </div>
                     </div>
                 </div>
@@ -126,22 +165,22 @@ describe('ReadReceiptDomFallback', () => {
         expect(indicator).toBeTruthy();
         expect(indicator.textContent).toBe('✓ 2');
 
-        // Indicator should be inside .post__body-reactions-acks, right after .post-reaction-list
-        const reactionList = postA.querySelector('.post-reaction-list');
-        expect(indicator.parentElement).toBe(reactionList?.parentElement);
-        expect(indicator.previousElementSibling).toBe(reactionList);
-        expect(indicator.nextElementSibling?.classList.contains('post-add-reaction')).toBe(true);
+        const body = postA.querySelector('.post__body');
+        expect(indicator.parentElement).toBe(body);
+
+        const autoHeight = postA.querySelector('.AutoHeight');
+        expect(indicator.previousElementSibling).toBe(autoHeight);
     });
 
-    it('inserts fallback indicator inside .post__body-reactions-acks when no reactions exist', async () => {
+    it('inserts fallback indicator into .post__body when no permalink or time exists (grouped post)', async () => {
         document.body.innerHTML = `
             <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
+                    <div class="post__header">
+                        <button>admin</button>
+                    </div>
                     <div class="post__body">
-                        <div class="AutoHeight">
-                            <div id="${postAID}_message">message A</div>
-                        </div>
-                        <div class="post__body-reactions-acks"></div>
+                        <div id="${postAID}_message">message A</div>
                     </div>
                 </div>
             </div>
@@ -155,16 +194,18 @@ describe('ReadReceiptDomFallback', () => {
         expect(indicator).toBeTruthy();
         expect(indicator.textContent).toBe('✓ 2');
 
-        // Indicator should be inside .post__body-reactions-acks, as first child
-        const reactionsAcks = postA.querySelector('.post__body-reactions-acks');
-        expect(indicator.parentElement).toBe(reactionsAcks);
-        expect(indicator).toBe(reactionsAcks?.firstElementChild);
+        const body = postA.querySelector('.post__body');
+        expect(indicator.parentElement).toBe(body);
     });
 
     it('injects fallback indicator in RHS thread post DOM', async () => {
         document.body.innerHTML = `
             <div class="post" data-testid="rhsPostView" id="rhsPost_${postAID}">
                 <div class="post__content" data-testid="postContent">
+                    <div class="post__header">
+                        <button>admin</button>
+                        <a class="post__permalink"><time class="post__time">4:15 PM</time></a>
+                    </div>
                     <div class="post__body">
                         <div class="AutoHeight">
                             <div class="post-message post-message--collapsed">
@@ -173,7 +214,6 @@ describe('ReadReceiptDomFallback', () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="post__body-reactions-acks"></div>
                     </div>
                 </div>
             </div>
@@ -187,16 +227,19 @@ describe('ReadReceiptDomFallback', () => {
         expect(indicator).toBeTruthy();
         expect(indicator.textContent).toBe('✓ 2');
 
-        // Indicator should be inside .post__body-reactions-acks
-        const reactionsAcks = rhsPost.querySelector('.post__body-reactions-acks');
-        expect(indicator.parentElement).toBe(reactionsAcks);
+        const header = rhsPost.querySelector('.post__header');
+        expect(indicator.parentElement).toBe(header);
     });
 
-    it('does not inject a duplicate fallback when a visible footer indicator is present', async () => {
+    it('does not inject a duplicate fallback when a visible non-fallback indicator is present', async () => {
         document.body.innerHTML = `
             <div class="post" data-testid="postView" id="post_${postAID}">
                 <div class="post__content">
-                    <span class="who-read-readers">✓ 2</span>
+                    <div class="post__header">
+                        <button>admin</button>
+                        <a class="post__permalink"><time class="post__time">4:15 PM</time></a>
+                        <span class="who-read-readers">✓ 2</span>
+                    </div>
                     <div class="post__body">
                         <div id="${postAID}_message">message A</div>
                     </div>

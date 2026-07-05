@@ -3,6 +3,7 @@ import {Store, Action} from 'redux';
 import {GlobalState} from 'mattermost-redux/types/store';
 
 import {getLastPostPerChannel} from 'mattermost-redux/selectors/entities/posts';
+import {getCurrentChannelId} from 'mattermost-redux/selectors/entities/channels';
 import {getCurrentUser} from 'mattermost-redux/selectors/entities/users';
 import {Post} from 'mattermost-redux/types/posts';
 import {UserProfile} from 'mattermost-redux/types/users';
@@ -12,7 +13,6 @@ import manifest from '@/manifest';
 
 import MirrorReactionHider from './components/MirrorReactionHider';
 import ReadReceiptDomFallback from './components/ReadReceiptDomFallback';
-import ReadReceiptIndicator from './components/ReadReceiptIndicator';
 import {DEFAULT_READ_RECEIPT_CONFIG, LEGACY_READ_RECEIPT_EMOJI, ReadReceiptConfig, resolveReadReceiptConfig} from './config/ReadReceiptConfig';
 import {
     READ_RECEIPT_CONFIG_CHANGED_WEBSOCKET_EVENT,
@@ -25,7 +25,7 @@ import {
 import Storage from './utils/Storage';
 import Logger from './utils/Logger';
 import {isValidPost} from './utils/Guards';
-import {canRegisterPostFooterComponent} from './utils/Registry';
+
 import ReadState from './services/ReadState';
 import PostService from './services/PostService';
 import ReactionService from './services/ReactionService';
@@ -55,7 +55,6 @@ export default class Plugin {
     private mirrorReactionHiderComponentId: string | null = null;
     private mirrorReactionHiderEmojiName: string | null = null;
     private readReceiptDomFallbackComponentId: string | null = null;
-    private readReceiptIndicatorComponentId: string | null = null;
     private serverWebSocketHandlersRegistered = false;
     private operationQueues = new Map<string, Promise<void>>();
     private store: Store<GlobalState, Action<Record<string, unknown>>> | null = null;
@@ -79,6 +78,15 @@ export default class Plugin {
         }
         Logger.log('document visible');
         await this.onWindowActive();
+    };
+
+    // Ссылки на обработчики online/offline для cleanup в uninitialize
+    private onlineHandler = async (): Promise<void> => {
+        await this.onNetworkRestored();
+    };
+
+    private offlineHandler = (): void => {
+        // Offline state is tracked implicitly — re-sync happens on 'online' event
     };
 
     private async onWindowActive(): Promise<void> {
@@ -107,6 +115,31 @@ export default class Plugin {
         }
     }
 
+    private async onNetworkRestored(delayMs = 2000): Promise<void> {
+        // Allow Mattermost WebSocket time to reconnect and fetch fresh data
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        if (!this.store) {
+            return;
+        }
+
+        const state = this.store.getState();
+        const channelId = getCurrentChannelId(state);
+        if (!channelId) {
+            return;
+        }
+
+        const lastPostsInChannel = getLastPostPerChannel(state);
+        const lastPost = lastPostsInChannel[channelId];
+        if (!lastPost || !isValidPost(lastPost)) {
+            return;
+        }
+
+        await this.enqueueOperation(`channel:${channelId}`, async () => {
+            await this.processViewedChannel(channelId, lastPost);
+        });
+    }
+
     private readReceiptUpdatedHandler = (event: ReadReceiptUpdatedWebSocketEvent): void => {
         dispatchReadReceiptUpdated(event.data || {});
     };
@@ -132,6 +165,8 @@ export default class Plugin {
         window.addEventListener('focus', this.focusHandler);
         window.addEventListener('blur', this.blurHandler);
         document.addEventListener('visibilitychange', this.visibilityChangeHandler);
+        window.addEventListener('online', this.onlineHandler);
+        window.addEventListener('offline', this.offlineHandler);
 
         // Set initial window state — the window is typically active when the plugin loads.
         this.readState.setWindowIsActive(typeof document !== 'undefined' && document.hasFocus());
@@ -263,10 +298,6 @@ export default class Plugin {
         }
 
         if (this.readReceiptConfig.isServerMode) {
-            if (canRegisterPostFooterComponent(registry)) {
-                this.readReceiptIndicatorComponentId = registry.registerPostFooterComponent(ReadReceiptIndicator);
-            }
-
             this.readReceiptDomFallbackComponentId = registry.registerRootComponent(ReadReceiptDomFallback);
         }
     }
@@ -276,6 +307,8 @@ export default class Plugin {
         window.removeEventListener('focus', this.focusHandler);
         window.removeEventListener('blur', this.blurHandler);
         document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
+        window.removeEventListener('online', this.onlineHandler);
+        window.removeEventListener('offline', this.offlineHandler);
         this.registry?.unregisterWebSocketEventHandler('multiple_channels_viewed');
         this.registry?.unregisterWebSocketEventHandler('thread_read_changed');
         if (this.serverWebSocketHandlersRegistered) {
@@ -286,10 +319,6 @@ export default class Plugin {
         if (this.mirrorReactionHiderComponentId) {
             this.registry?.unregisterComponent(this.mirrorReactionHiderComponentId);
             this.mirrorReactionHiderComponentId = null;
-        }
-        if (this.readReceiptIndicatorComponentId) {
-            this.registry?.unregisterComponent(this.readReceiptIndicatorComponentId);
-            this.readReceiptIndicatorComponentId = null;
         }
         if (this.readReceiptDomFallbackComponentId) {
             this.registry?.unregisterComponent(this.readReceiptDomFallbackComponentId);
